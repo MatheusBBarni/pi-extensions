@@ -122,6 +122,11 @@ class MessageQueueEditor extends CustomEditor {
 		super(tui, theme, keybindingsManager);
 	}
 
+	async dispatchSubmittedText(text: string): Promise<void> {
+		const result = this.onSubmit?.(text);
+		await Promise.resolve(result);
+	}
+
 	handleInput(data: string): void {
 		const isFollowUp = this.keybindingsManager.matches(data, "app.message.followUp");
 		if (isFollowUp) {
@@ -239,6 +244,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	let widgetVisible = true;
 	let dispatching: PendingDispatch | undefined;
 	let pumpHandle: ReturnType<typeof setImmediate> | undefined;
+	let activeEditor: MessageQueueEditor | undefined;
 	// pi.sendUserMessage intentionally bypasses slash-command dispatch. Keep the latest
 	// /queue command context so delayed built-in commands can use Pi's command API once idle.
 	let lastCommandCtx: ExtensionCommandContext | undefined;
@@ -454,54 +460,75 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		return true;
 	}
 
+	function dequeueForCommandDispatch(item: QueuedMessage, ctx: ExtensionContext, commandName: string): boolean {
+		const current = queue[0];
+		if (!current || current.id !== item.id) return false;
+
+		queue.shift();
+		commandContextNoticeIds.delete(item.id);
+		persist();
+		updateUi(ctx, `running /${commandName}`);
+		ctx.ui.notify(`Running queued /${commandName}.`, "info");
+		return true;
+	}
+
+	function requeueFailedCommand(item: QueuedMessage, ctx: ExtensionContext, commandName: string, note: string) {
+		queue.unshift(item);
+		persist();
+		updateUi(ctx, `failed to run /${commandName}`);
+		ctx.ui.notify(`Message queue failed to run /${commandName}: ${note}`, "error");
+	}
+
 	async function dispatchQueuedBuiltinCommand(
 		item: QueuedMessage,
 		command: QueuedBuiltinCommand,
 		ctx: ExtensionContext,
 	): Promise<boolean> {
 		const commandCtx = getCommandContext(ctx);
-		if (!commandCtx) {
-			if (!commandContextNoticeIds.has(item.id)) {
-				commandContextNoticeIds.add(item.id);
-				ctx.ui.notify(
-					`Queued /${command.name} needs a command-capable context. Run /queue resume after Pi is idle to dispatch it.`,
-					"warning",
-				);
-			}
-			return true;
-		}
+		if (commandCtx) {
+			if (!dequeueForCommandDispatch(item, ctx, command.name)) return true;
 
-		const current = queue[0];
-		if (!current || current.id !== item.id) return true;
-
-		queue.shift();
-		commandContextNoticeIds.delete(item.id);
-		persist();
-		updateUi(ctx, `running /${command.name}`);
-		ctx.ui.notify(`Running queued /${command.name}.`, "info");
-
-		try {
-			if (command.name === "new") {
-				const result = await commandCtx.newSession();
-				if (result.cancelled) {
-					queue.unshift(item);
-					persist();
-					updateUi(ctx, "cancelled /new");
-					ctx.ui.notify("Queued /new was cancelled.", "warning");
+			try {
+				if (command.name === "new") {
+					const result = await commandCtx.newSession();
+					if (result.cancelled) {
+						queue.unshift(item);
+						persist();
+						updateUi(ctx, "cancelled /new");
+						ctx.ui.notify("Queued /new was cancelled.", "warning");
+					}
+					return true;
 				}
+
+				await commandCtx.reload();
+				return true;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				requeueFailedCommand(item, ctx, command.name, message);
 				return true;
 			}
-
-			await commandCtx.reload();
-			return true;
-		} catch (error) {
-			queue.unshift(item);
-			persist();
-			updateUi(ctx, `failed to run /${command.name}`);
-			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`Message queue failed to run /${command.name}: ${message}`, "error");
-			return true;
 		}
+
+		if (activeEditor?.onSubmit) {
+			if (!dequeueForCommandDispatch(item, ctx, command.name)) return true;
+			try {
+				await activeEditor.dispatchSubmittedText(`/${command.name}`);
+				return true;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				requeueFailedCommand(item, ctx, command.name, message);
+				return true;
+			}
+		}
+
+		if (!commandContextNoticeIds.has(item.id)) {
+			commandContextNoticeIds.add(item.id);
+			ctx.ui.notify(
+				`Queued /${command.name} needs an interactive command dispatcher. Run /queue resume after Pi is idle to dispatch it.`,
+				"warning",
+			);
+		}
+		return true;
 	}
 
 	async function pump(ctx: ExtensionContext) {
@@ -676,9 +703,11 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		restore(ctx);
-		ctx.ui.setEditorComponent((tui, theme, keybindings) =>
-			new MessageQueueEditor(tui, theme, keybindings, (text) => queueInputWhileWorking(text, ctx)),
-		);
+		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+			const editor = new MessageQueueEditor(tui, theme, keybindings, (text) => queueInputWhileWorking(text, ctx));
+			activeEditor = editor;
+			return editor;
+		});
 		schedulePump(ctx);
 	});
 
@@ -708,6 +737,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		dispatching = undefined;
+		activeEditor = undefined;
 		lastCommandCtx = undefined;
 		commandContextNoticeIds.clear();
 		if (pumpHandle) clearImmediate(pumpHandle);
