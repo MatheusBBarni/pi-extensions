@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const STATE_ENTRY_TYPE = "pi-message-queue:state";
 const STATUS_KEY = "pi-message-queue";
@@ -8,6 +8,7 @@ const MAX_WIDGET_ITEMS = 5;
 const MAX_PREVIEW_LENGTH = 96;
 
 type QueuePosition = "back" | "front";
+type QueuedBuiltinCommand = { name: "new" | "reload" };
 
 interface QueuedMessage {
 	id: number;
@@ -76,6 +77,22 @@ function formatQueue(queue: QueuedMessage[], paused: boolean): string {
 	return [header, ...items].join("\n");
 }
 
+function getQueuedBuiltinCommand(text: string): QueuedBuiltinCommand | undefined {
+	const trimmed = text.trim();
+	if (trimmed === "/new") return { name: "new" };
+	if (trimmed === "/reload") return { name: "reload" };
+	return undefined;
+}
+
+function hasCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
+	return (
+		"newSession" in ctx &&
+		typeof ctx.newSession === "function" &&
+		"reload" in ctx &&
+		typeof ctx.reload === "function"
+	);
+}
+
 function splitCommand(args: string): { command: string; rest: string } {
 	const trimmed = args.trim();
 	if (!trimmed) return { command: "list", rest: "" };
@@ -124,6 +141,10 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	let widgetVisible = true;
 	let dispatching: PendingDispatch | undefined;
 	let pumpHandle: ReturnType<typeof setImmediate> | undefined;
+	// pi.sendUserMessage intentionally bypasses slash-command dispatch. Keep the latest
+	// /queue command context so delayed built-in commands can use Pi's command API once idle.
+	let lastCommandCtx: ExtensionCommandContext | undefined;
+	const commandContextNoticeIds = new Set<number>();
 
 	function snapshot(): QueueStateSnapshot {
 		return {
@@ -187,6 +208,8 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		nextId = 1;
 		widgetVisible = true;
 		dispatching = undefined;
+		lastCommandCtx = undefined;
+		commandContextNoticeIds.clear();
 		if (pumpHandle) clearImmediate(pumpHandle);
 		pumpHandle = undefined;
 
@@ -267,7 +290,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		if (pumpHandle) return;
 		pumpHandle = setImmediate(() => {
 			pumpHandle = undefined;
-			pump(ctx);
+			void pump(ctx);
 		});
 	}
 
@@ -283,19 +306,88 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		return undefined;
 	}
 
-	function pump(ctx: ExtensionContext) {
+	function rememberCommandContext(ctx: ExtensionCommandContext) {
+		lastCommandCtx = ctx;
+	}
+
+	function getCommandContext(ctx: ExtensionContext): ExtensionCommandContext | undefined {
+		if (hasCommandContext(ctx)) {
+			rememberCommandContext(ctx);
+			return ctx;
+		}
+
+		return lastCommandCtx;
+	}
+
+	async function dispatchQueuedBuiltinCommand(
+		item: QueuedMessage,
+		command: QueuedBuiltinCommand,
+		ctx: ExtensionContext,
+	): Promise<boolean> {
+		const commandCtx = getCommandContext(ctx);
+		if (!commandCtx) {
+			if (!commandContextNoticeIds.has(item.id)) {
+				commandContextNoticeIds.add(item.id);
+				ctx.ui.notify(
+					`Queued /${command.name} needs a command-capable context. Run /queue resume after Pi is idle to dispatch it.`,
+					"warning",
+				);
+			}
+			return true;
+		}
+
+		const current = queue[0];
+		if (!current || current.id !== item.id) return true;
+
+		queue.shift();
+		commandContextNoticeIds.delete(item.id);
+		persist();
+		updateUi(ctx, `running /${command.name}`);
+		ctx.ui.notify(`Running queued /${command.name}.`, "info");
+
+		try {
+			if (command.name === "new") {
+				const result = await commandCtx.newSession();
+				if (result.cancelled) {
+					queue.unshift(item);
+					persist();
+					updateUi(ctx, "cancelled /new");
+					ctx.ui.notify("Queued /new was cancelled.", "warning");
+				}
+				return true;
+			}
+
+			await commandCtx.reload();
+			return true;
+		} catch (error) {
+			queue.unshift(item);
+			persist();
+			updateUi(ctx, `failed to run /${command.name}`);
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Message queue failed to run /${command.name}: ${message}`, "error");
+			return true;
+		}
+	}
+
+	async function pump(ctx: ExtensionContext) {
 		updateUi(ctx);
 		if (dispatching || paused || queue.length === 0) return;
 		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+
+		const next = queue[0];
+		if (!next) return;
+
+		const builtinCommand = getQueuedBuiltinCommand(next.text);
+		if (builtinCommand) {
+			await dispatchQueuedBuiltinCommand(next, builtinCommand, ctx);
+			return;
+		}
 
 		const blocker = getDispatchBlocker(ctx);
 		if (blocker) {
 			ctx.ui.notify(blocker, "warning");
 			return;
 		}
-
-		const next = queue[0];
-		if (!next) return;
 
 		dispatching = { id: next.id, accepted: false };
 		updateUi(ctx, `sending #${next.id}`);
@@ -327,7 +419,8 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		updateUi(ctx, `accepted #${pending.id}`);
 	}
 
-	async function handleQueueCommand(args: string, ctx: ExtensionContext) {
+	async function handleQueueCommand(args: string, ctx: ExtensionCommandContext) {
+		rememberCommandContext(ctx);
 		const { command, rest } = splitCommand(args);
 
 		switch (command) {
@@ -425,6 +518,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 						"/queue next <message> — put at front",
 						"/queue list | pause | resume | clear | remove <n|#id>",
 						"/queue edit-last or Shift+Left — edit the last queued message",
+						"Queued /new and /reload entries run as Pi commands.",
 						"/q <message> is a short alias. Ctrl+Shift+Q queues editor text.",
 					].join("\n"),
 					"info",
@@ -459,6 +553,8 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		dispatching = undefined;
+		lastCommandCtx = undefined;
+		commandContextNoticeIds.clear();
 		if (pumpHandle) clearImmediate(pumpHandle);
 		pumpHandle = undefined;
 	});

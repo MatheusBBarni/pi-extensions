@@ -51,6 +51,7 @@ Shortcut:
 
 - Queued messages are shown in a compact below-editor widget similar to Pi's built-in follow-up queue display.
 - Queued messages are sent only when Pi is idle and there are no native Pi pending messages.
+- Queued `/new` and `/reload` entries run Pi's built-in commands instead of being sent to the agent as prompt text.
 - After a queued message completes, the next queued message is sent automatically.
 - Queue state is stored as custom session entries, so it survives `/reload`, session resume, and tree navigation on the active branch.
 - Custom state entries do not participate in LLM context.
