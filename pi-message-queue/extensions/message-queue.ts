@@ -123,10 +123,8 @@ class MessageQueueEditor extends CustomEditor {
 	}
 
 	handleInput(data: string): void {
-		const isSubmit =
-			this.keybindingsManager.matches(data, "tui.input.submit") ||
-			this.keybindingsManager.matches(data, "app.message.followUp");
-		if (isSubmit && !this.isShowingAutocomplete()) {
+		const isFollowUp = this.keybindingsManager.matches(data, "app.message.followUp");
+		if (isFollowUp) {
 			const text = this.getExpandedText();
 			if (this.queueInput(text)) {
 				this.setText("");
@@ -134,7 +132,23 @@ class MessageQueueEditor extends CustomEditor {
 			}
 		}
 
-		super.handleInput(data);
+		if (!this.keybindingsManager.matches(data, "tui.input.submit")) {
+			super.handleInput(data);
+			return;
+		}
+
+		const originalOnSubmit = this.onSubmit;
+		this.onSubmit = (text) => {
+			if (!this.queueInput(text)) {
+				originalOnSubmit?.(text);
+			}
+		};
+
+		try {
+			super.handleInput(data);
+		} finally {
+			this.onSubmit = originalOnSubmit;
+		}
 	}
 }
 
