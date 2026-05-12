@@ -1,4 +1,11 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	CustomEditor,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+	type KeybindingsManager,
+} from "@earendil-works/pi-coding-agent";
+import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 
 const STATE_ENTRY_TYPE = "pi-message-queue:state";
 const STATUS_KEY = "pi-message-queue";
@@ -91,6 +98,29 @@ function hasCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContex
 		"reload" in ctx &&
 		typeof ctx.reload === "function"
 	);
+}
+
+class MessageQueueEditor extends CustomEditor {
+	constructor(
+		tui: TUI,
+		theme: EditorTheme,
+		private readonly keybindingsManager: KeybindingsManager,
+		private readonly queueBuiltinCommand: (text: string) => boolean,
+	) {
+		super(tui, theme, keybindingsManager);
+	}
+
+	handleInput(data: string): void {
+		if (this.keybindingsManager.matches(data, "tui.input.submit") && !this.isShowingAutocomplete()) {
+			const text = this.getExpandedText();
+			if (this.queueBuiltinCommand(text)) {
+				this.setText("");
+				return;
+			}
+		}
+
+		super.handleInput(data);
+	}
 }
 
 function splitCommand(args: string): { command: string; rest: string } {
@@ -319,6 +349,19 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		return lastCommandCtx;
 	}
 
+	function queueBuiltinCommandWhileWorking(text: string, ctx: ExtensionContext): boolean {
+		const trimmed = text.trim();
+		const isWorking = !ctx.isIdle() || ctx.hasPendingMessages();
+		if (!isWorking || !getQueuedBuiltinCommand(trimmed)) return false;
+
+		const item = enqueue(trimmed, "back", ctx);
+		if (item) {
+			ctx.ui.notify(`Queued #${item.id} while Pi is working.`, "info");
+			schedulePump(ctx);
+		}
+		return true;
+	}
+
 	async function dispatchQueuedBuiltinCommand(
 		item: QueuedMessage,
 		command: QueuedBuiltinCommand,
@@ -529,6 +572,9 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		restore(ctx);
+		ctx.ui.setEditorComponent((tui, theme, keybindings) =>
+			new MessageQueueEditor(tui, theme, keybindings, (text) => queueBuiltinCommandWhileWorking(text, ctx)),
+		);
 		schedulePump(ctx);
 	});
 
@@ -539,6 +585,22 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_start", async (_event, ctx) => {
 		updateUi(ctx);
+	});
+
+	pi.on("input", async (event, ctx) => {
+		const text = event.text.trim();
+		const isWorking = !ctx.isIdle() || ctx.hasPendingMessages();
+		if (event.source === "extension" || !isWorking || !text || text.startsWith("/")) {
+			return { action: "continue" };
+		}
+
+		const item = enqueue(text, "back", ctx);
+		if (item) {
+			ctx.ui.notify(`Queued #${item.id} while Pi is working.`, "info");
+			schedulePump(ctx);
+		}
+
+		return { action: "handled" };
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {

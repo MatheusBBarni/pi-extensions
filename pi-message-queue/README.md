@@ -50,6 +50,8 @@ Shortcut:
 ## Behavior
 
 - Queued messages are shown in a compact below-editor widget similar to Pi's built-in follow-up queue display.
+- Ordinary user messages submitted while Pi is working are captured into this persistent queue instead of Pi's native steering/follow-up queue.
+- Typing `/new` or `/reload` while Pi is working also queues those commands instead of showing Pi's built-in wait warning.
 - Queued messages are sent only when Pi is idle and there are no native Pi pending messages.
 - Queued `/new` and `/reload` entries run Pi's built-in commands instead of being sent to the agent as prompt text.
 - After a queued message completes, the next queued message is sent automatically.
