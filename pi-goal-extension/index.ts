@@ -66,6 +66,7 @@ interface GoalState {
 	lastError?: string;
 	lastLogFile?: string;
 	lastMessageFile?: string;
+	lastDurationMs?: number;
 	lastCommand?: string[];
 }
 
@@ -102,6 +103,7 @@ interface CodexRunResult {
 	summary: string;
 	logFile: string;
 	lastMessageFile: string;
+	durationMs: number;
 	args: string[];
 }
 
@@ -195,6 +197,7 @@ export default function codexGoalInteractive(pi: ExtensionAPI) {
 			lastError: raw.lastError,
 			lastLogFile: raw.lastLogFile,
 			lastMessageFile: raw.lastMessageFile,
+			lastDurationMs: typeof raw.lastDurationMs === "number" ? raw.lastDurationMs : undefined,
 			lastCommand: raw.lastCommand,
 		};
 	}
@@ -257,7 +260,8 @@ export default function codexGoalInteractive(pi: ExtensionAPI) {
 
 	function formatGoal(goal: GoalState): string {
 		const session = goal.sessionId ? ` session ${goal.sessionId.slice(0, 8)}` : " no session yet";
-		return `${goal.name}: ${STATUS_ICONS[goal.status]} ${goal.status} (${goal.runs} run${goal.runs === 1 ? "" : "s"},${session})`;
+		const duration = goal.lastDurationMs ? `, last run ${formatDuration(goal.lastDurationMs)}` : "";
+		return `${goal.name}: ${STATUS_ICONS[goal.status]} ${goal.status} (${goal.runs} run${goal.runs === 1 ? "" : "s"},${session}${duration})`;
 	}
 
 	function updateUI(ctx: ExtensionContext, progress?: string): void {
@@ -856,6 +860,7 @@ ${objective.trim()}
 				flushStdoutBuffer();
 				stdoutLog.end();
 
+				const durationMs = Date.now() - startedAtMs;
 				const lastMessage = tryRead(options.lastMessageFile)?.trim() || undefined;
 				const fallbackText = extractCodexText(stdout) || stderr.trim() || lastProgress || "Codex finished with no output.";
 				const newestId = newestSessionIdSince(beforeIndex, startedAtMs);
@@ -871,6 +876,7 @@ ${objective.trim()}
 					summary: truncateText(lastMessage ?? fallbackText, 4000),
 					logFile: options.logFile,
 					lastMessageFile: options.lastMessageFile,
+					durationMs,
 					args,
 				});
 			};
@@ -973,6 +979,7 @@ ${objective.trim()}
 		state.lastError = result.stderr ? truncateText(result.stderr, 4000) : undefined;
 		state.lastLogFile = path.relative(ctx.cwd, result.logFile);
 		state.lastMessageFile = path.relative(ctx.cwd, result.lastMessageFile);
+		state.lastDurationMs = result.durationMs;
 		state.lastCommand = ["codex", ...result.args];
 
 		const combined = `${result.summary}\n${result.stderr}`;
@@ -992,7 +999,7 @@ ${objective.trim()}
 		}
 
 		saveState(ctx, state);
-		progressPanel.finish(`Codex goal ${state.status}`, state.status === "failed" ? "error" : "done");
+		progressPanel.finish(`Codex goal ${state.status} in ${formatDuration(result.durationMs)}`, state.status === "failed" ? "error" : "done");
 		progressPanel.stop();
 		return result;
 	}
@@ -1042,7 +1049,7 @@ ${objective.trim()}
 			onProgress: (message) => progressPanel.event(message),
 		});
 		if (ctx.hasUI) ctx.ui.setWorkingMessage();
-		progressPanel.finish(result.code === 0 ? "Codex one-shot finished" : `Codex one-shot failed (${result.code ?? "signal"})`, result.code === 0 ? "done" : "error");
+		progressPanel.finish(result.code === 0 ? `Codex one-shot finished in ${formatDuration(result.durationMs)}` : `Codex one-shot failed (${result.code ?? "signal"}) in ${formatDuration(result.durationMs)}`, result.code === 0 ? "done" : "error");
 		progressPanel.stop();
 		return result;
 	}
@@ -1191,7 +1198,7 @@ ${objective.trim()}
 			return;
 		}
 		const result = await runOneShot(ctx, goal, args);
-		notify(ctx, `codex /goal finished:\n${truncateText(cleanMarkers(result.summary), 2500)}`, result.code === 0 ? "info" : "error");
+		notify(ctx, `codex /goal finished in ${formatDuration(result.durationMs)}:\n${truncateText(cleanMarkers(result.summary), 2500)}`, result.code === 0 ? "info" : "error");
 	}
 
 	function handleStop(_rest: string, ctx: ExtensionContext) {
@@ -1237,7 +1244,8 @@ ${objective.trim()}
 		const log = state.lastLogFile ? path.resolve(ctx.cwd, state.lastLogFile) : undefined;
 		const msg = state.lastMessageFile ? path.resolve(ctx.cwd, state.lastMessageFile) : undefined;
 		const output = state.lastOutput ?? (msg ? tryRead(msg) : undefined) ?? "No output captured yet.";
-		notify(ctx, `Codex goal ${name}\nLog: ${log ?? "none"}\nLast message: ${msg ?? "none"}\n\n${truncateText(output, 2500)}`, "info");
+		const duration = state.lastDurationMs ? `\nDuration: ${formatDuration(state.lastDurationMs)}` : "";
+		notify(ctx, `Codex goal ${name}\nLog: ${log ?? "none"}\nLast message: ${msg ?? "none"}${duration}\n\n${truncateText(output, 2500)}`, "info");
 	}
 
 	async function handleEdit(rest: string, ctx: ExtensionContext) {
@@ -1357,8 +1365,9 @@ ${objective.trim()}
 		const clean = truncateText(cleanMarkers(result.summary), 2500);
 		const session = state.sessionId ? `\nSession: ${state.sessionId}` : "";
 		const log = state.lastLogFile ? `\nLog: ${state.lastLogFile}` : "";
+		const duration = `\nDuration: ${formatDuration(result.durationMs)}`;
 		const level: NotifyLevel = state.status === "failed" ? "error" : "info";
-		notify(ctx, `Codex goal "${state.name}" ${state.status}.${session}${log}\n\n${clean}`, level);
+		notify(ctx, `Codex goal "${state.name}" ${state.status} in ${formatDuration(result.durationMs)}.${session}${log}${duration}\n\n${clean}`, level);
 	}
 
 	const HELP = `Codex Goal - interactive Codex /goal sessions
@@ -1485,7 +1494,7 @@ Examples:
 			};
 			const result = await runOneShot(ctx, params.goal, parsed, { signal, onUpdate });
 			return {
-				content: [{ type: "text", text: truncateText(cleanMarkers(result.summary), 2500) }],
+				content: [{ type: "text", text: `Codex /goal finished in ${formatDuration(result.durationMs)}.\n${truncateText(cleanMarkers(result.summary), 2500)}` }],
 				details: { result },
 			};
 		},
@@ -1541,7 +1550,7 @@ Examples:
 
 			const result = await runGoal(ctx, state, "start", buildStartPrompt(state, content), { signal, onUpdate });
 			return {
-				content: [{ type: "text", text: `Codex goal "${name}" ${state.status}.\n${truncateText(cleanMarkers(result.summary), 2500)}` }],
+				content: [{ type: "text", text: `Codex goal "${name}" ${state.status} in ${formatDuration(result.durationMs)}.\n${truncateText(cleanMarkers(result.summary), 2500)}` }],
 				details: { state, result },
 			};
 		},
@@ -1569,7 +1578,7 @@ Examples:
 			if (!taskContent) return { content: [{ type: "text", text: `Could not read task file: ${state.taskFile}` }], details: { state } };
 			const result = await runGoal(ctx, state, "resume", buildResumePrompt(state, taskContent, params.prompt), { signal, onUpdate });
 			return {
-				content: [{ type: "text", text: `Codex goal "${name}" ${state.status}.\n${truncateText(cleanMarkers(result.summary), 2500)}` }],
+				content: [{ type: "text", text: `Codex goal "${name}" ${state.status} in ${formatDuration(result.durationMs)}.\n${truncateText(cleanMarkers(result.summary), 2500)}` }],
 				details: { state, result },
 			};
 		},

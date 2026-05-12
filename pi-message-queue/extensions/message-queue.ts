@@ -24,6 +24,11 @@ interface QueueStateSnapshot {
 	updatedAt: string;
 }
 
+interface PendingDispatch {
+	id: number;
+	accepted: boolean;
+}
+
 function isQueuedMessage(value: unknown): value is QueuedMessage {
 	if (!value || typeof value !== "object") return false;
 	const msg = value as Partial<QueuedMessage>;
@@ -117,7 +122,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	let paused = false;
 	let nextId = 1;
 	let widgetVisible = true;
-	let dispatching = false;
+	let dispatching: PendingDispatch | undefined;
 	let pumpHandle: ReturnType<typeof setImmediate> | undefined;
 
 	function snapshot(): QueueStateSnapshot {
@@ -141,7 +146,12 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		const theme = ctx.ui.theme;
 		const count = queue.length;
 		if (count === 0) {
-			ctx.ui.setStatus(STATUS_KEY, paused ? theme.fg("warning", "queue paused") : undefined);
+			const status = dispatching
+				? theme.fg("accent", "↗ queue sending")
+				: paused
+					? theme.fg("warning", "queue paused")
+					: undefined;
+			ctx.ui.setStatus(STATUS_KEY, status);
 			ctx.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
 			return;
 		}
@@ -176,7 +186,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		paused = false;
 		nextId = 1;
 		widgetVisible = true;
-		dispatching = false;
+		dispatching = undefined;
 		if (pumpHandle) clearImmediate(pumpHandle);
 		pumpHandle = undefined;
 
@@ -261,28 +271,60 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		});
 	}
 
+	function getDispatchBlocker(ctx: ExtensionContext): string | undefined {
+		if (!ctx.model) {
+			return "No model is selected. Select a model before resuming the message queue.";
+		}
+
+		if (!ctx.modelRegistry.hasConfiguredAuth(ctx.model)) {
+			return `No configured auth for "${ctx.model.provider}". Fix authentication before resuming the message queue.`;
+		}
+
+		return undefined;
+	}
+
 	function pump(ctx: ExtensionContext) {
 		updateUi(ctx);
 		if (dispatching || paused || queue.length === 0) return;
 		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
 
-		const next = queue.shift();
+		const blocker = getDispatchBlocker(ctx);
+		if (blocker) {
+			ctx.ui.notify(blocker, "warning");
+			return;
+		}
+
+		const next = queue[0];
 		if (!next) return;
 
-		dispatching = true;
-		persist();
+		dispatching = { id: next.id, accepted: false };
 		updateUi(ctx, `sending #${next.id}`);
 
 		try {
 			pi.sendUserMessage(next.text);
 		} catch (error) {
-			queue.unshift(next);
-			dispatching = false;
-			persist();
+			dispatching = undefined;
 			updateUi(ctx, `failed to send #${next.id}`);
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`Message queue failed to send #${next.id}: ${message}`, "error");
 		}
+	}
+
+	function acceptPendingDispatch(ctx: ExtensionContext) {
+		if (!dispatching || dispatching.accepted) return;
+
+		const pending = dispatching;
+		const next = queue[0];
+		if (!next || next.id !== pending.id) {
+			dispatching = undefined;
+			updateUi(ctx);
+			return;
+		}
+
+		queue.shift();
+		dispatching = { ...pending, accepted: true };
+		persist();
+		updateUi(ctx, `accepted #${pending.id}`);
 	}
 
 	async function handleQueueCommand(args: string, ctx: ExtensionContext) {
@@ -405,14 +447,18 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		updateUi(ctx);
 	});
 
+	pi.on("before_agent_start", async (_event, ctx) => {
+		acceptPendingDispatch(ctx);
+	});
+
 	pi.on("agent_end", async (_event, ctx) => {
-		dispatching = false;
+		dispatching = undefined;
 		updateUi(ctx);
 		schedulePump(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
-		dispatching = false;
+		dispatching = undefined;
 		if (pumpHandle) clearImmediate(pumpHandle);
 		pumpHandle = undefined;
 	});
