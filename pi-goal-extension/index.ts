@@ -15,6 +15,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 
 const GOAL_DIR = ".codex-goals";
+const TEMPLATE_DIRS = [".pi-goals", path.join(".ai", ".pi-goals"), path.join(GOAL_DIR, "templates")] as const;
+const TEMPLATE_EXTENSIONS = [".md", ".markdown", ".txt"] as const;
+const MAX_TEMPLATE_FILES = 200;
 const COMPLETE_MARKER = "<codex-goal>COMPLETE</codex-goal>";
 const NEEDS_RESUME_MARKER = "<codex-goal>NEEDS_RESUME</codex-goal>";
 const DEFAULT_TIMEOUT_MS = 1_200_000;
@@ -22,6 +25,7 @@ const DEFAULT_SANDBOX = "workspace-write" as const;
 const DEFAULT_MODEL = undefined as string | undefined;
 const DEFAULT_PROFILE = undefined as string | undefined;
 const SANDBOX_VALUES = ["read-only", "workspace-write", "danger-full-access"] as const;
+const GOAL_CONTEXT_MESSAGE_TYPE = "codex-goal:result";
 
 const DEFAULT_TEMPLATE = `# Codex Goal
 
@@ -43,7 +47,7 @@ type SandboxMode = (typeof SANDBOX_VALUES)[number];
 type GoalStatus = "running" | "paused" | "completed" | "failed";
 type NotifyLevel = "info" | "warning" | "error";
 type TextContent = { type: "text"; text: string };
-type ToolUpdate = { content?: TextContent[]; details?: Record<string, unknown> };
+type ToolUpdate = { content: TextContent[]; details: Record<string, unknown> };
 
 interface GoalState {
 	version: 1;
@@ -74,6 +78,9 @@ interface ParsedArgs {
 	positionals: string[];
 	name?: string;
 	file?: string;
+	template?: string;
+	templateValues: Record<string, string>;
+	templateArgs: string;
 	sandbox: SandboxMode;
 	timeoutMs: number;
 	model?: string;
@@ -107,6 +114,19 @@ interface CodexRunResult {
 	args: string[];
 }
 
+interface GoalTemplate {
+	name: string;
+	path: string;
+	description?: string;
+	aliases: string[];
+	body: string;
+}
+
+interface ResolvedTemplate {
+	template: GoalTemplate;
+	objective: string;
+}
+
 const STATUS_ICONS: Record<GoalStatus, string> = {
 	running: "▶",
 	paused: "⏸",
@@ -125,6 +145,7 @@ export default function codexGoalInteractive(pi: ExtensionAPI) {
 	const goalDir = (ctx: ExtensionContext) => path.resolve(ctx.cwd, GOAL_DIR);
 	const logsDir = (ctx: ExtensionContext) => path.join(goalDir(ctx), "logs");
 	const archiveDir = (ctx: ExtensionContext) => path.join(goalDir(ctx), "archive");
+	const templateRoots = (ctx: ExtensionContext) => TEMPLATE_DIRS.map((dir) => path.resolve(ctx.cwd, dir));
 
 	function sanitize(name: string): string {
 		const value = name.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
@@ -169,6 +190,115 @@ export default function codexGoalInteractive(pi: ExtensionAPI) {
 	function writeFile(filePath: string, content: string): void {
 		ensureDir(filePath);
 		fs.writeFileSync(filePath, content, "utf-8");
+	}
+
+	// --- reusable templates -------------------------------------------------
+
+	function toTemplateName(root: string, filePath: string): string {
+		const relative = path.relative(root, filePath);
+		const parsed = path.parse(relative);
+		return path.join(parsed.dir, parsed.name).split(path.sep).join("/");
+	}
+
+	function parseTemplateFrontmatter(content: string): { body: string; metadata: Record<string, string> } {
+		if (!content.startsWith("---")) return { body: content, metadata: {} };
+		const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content);
+		if (!match) return { body: content, metadata: {} };
+		const metadata: Record<string, string> = {};
+		for (const line of match[1].split(/\r?\n/)) {
+			const pair = /^([a-zA-Z0-9_-]+)\s*:\s*(.*)$/.exec(line.trim());
+			if (!pair) continue;
+			metadata[pair[1]] = pair[2].trim().replace(/^["']|["']$/g, "");
+		}
+		return { body: content.slice(match[0].length), metadata };
+	}
+
+	function parseAliases(value: string | undefined): string[] {
+		if (!value) return [];
+		return value
+			.replace(/^\[|\]$/g, "")
+			.split(",")
+			.map((alias) => alias.trim().replace(/^["']|["']$/g, ""))
+			.filter(Boolean);
+	}
+
+	function collectTemplateFiles(root: string, output: string[]): void {
+		if (output.length >= MAX_TEMPLATE_FILES || !fs.existsSync(root)) return;
+		const entries = fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+		for (const entry of entries) {
+			if (output.length >= MAX_TEMPLATE_FILES) return;
+			const filePath = path.join(root, entry.name);
+			if (entry.isDirectory()) {
+				collectTemplateFiles(filePath, output);
+				continue;
+			}
+			if (entry.isFile() && TEMPLATE_EXTENSIONS.includes(path.extname(entry.name) as (typeof TEMPLATE_EXTENSIONS)[number])) {
+				output.push(filePath);
+			}
+		}
+	}
+
+	function discoverTemplates(ctx: ExtensionContext): GoalTemplate[] {
+		const templates: GoalTemplate[] = [];
+		const seen = new Set<string>();
+		for (const root of templateRoots(ctx)) {
+			const files: string[] = [];
+			collectTemplateFiles(root, files);
+			for (const filePath of files) {
+				const name = toTemplateName(root, filePath);
+				if (seen.has(name)) continue;
+				const content = tryRead(filePath);
+				if (!content) continue;
+				const parsed = parseTemplateFrontmatter(content);
+				templates.push({
+					name,
+					path: path.relative(ctx.cwd, filePath),
+					description: parsed.metadata.description,
+					aliases: parseAliases(parsed.metadata.aliases),
+					body: parsed.body.trim(),
+				});
+				seen.add(name);
+			}
+		}
+		return templates.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	function findTemplate(ctx: ExtensionContext, nameOrAlias: string): GoalTemplate | undefined {
+		const normalized = nameOrAlias.toLowerCase();
+		return discoverTemplates(ctx).find((template) => {
+			return template.name.toLowerCase() === normalized || template.aliases.some((alias) => alias.toLowerCase() === normalized);
+		});
+	}
+
+	function resolveTemplate(ctx: ExtensionContext, nameOrAlias: string, values: Record<string, string>, args: string): ResolvedTemplate {
+		const template = findTemplate(ctx, nameOrAlias);
+		if (!template) {
+			const available = discoverTemplates(ctx).map((item) => item.name).join(", ") || "none";
+			throw new Error(`Goal template "${nameOrAlias}" not found. Available templates: ${available}`);
+		}
+
+		const missing = new Set<string>();
+		const objective = template.body.replace(/{{\s*([a-zA-Z0-9_-]+)\s*}}/g, (_match, key: string) => {
+			if (key === "args") return args;
+			const value = values[key];
+			if (value === undefined) {
+				missing.add(key);
+				return "";
+			}
+			return value;
+		});
+
+		if (missing.size > 0) {
+			throw new Error(`Goal template "${template.name}" is missing value(s): ${[...missing].sort().map((key) => `--${key}`).join(", ")}`);
+		}
+
+		return { template, objective: objective.trim() };
+	}
+
+	function formatTemplate(template: GoalTemplate): string {
+		const aliases = template.aliases.length > 0 ? ` aliases: ${template.aliases.join(", ")}` : "";
+		const description = template.description ? ` - ${template.description}` : "";
+		return `${template.name}${aliases}${description}\n    ${template.path}`;
 	}
 
 	// --- state --------------------------------------------------------------
@@ -510,6 +640,8 @@ export default function codexGoalInteractive(pi: ExtensionAPI) {
 		const tokens = tokenize(argsStr);
 		const result: ParsedArgs = {
 			positionals: [],
+			templateValues: {},
+			templateArgs: "",
 			sandbox: DEFAULT_SANDBOX,
 			timeoutMs: DEFAULT_TIMEOUT_MS,
 			model: DEFAULT_MODEL,
@@ -524,11 +656,19 @@ export default function codexGoalInteractive(pi: ExtensionAPI) {
 		for (let i = 0; i < tokens.length; i++) {
 			const tok = tokens[i];
 			const next = tokens[i + 1];
-			if ((tok === "--name" || tok === "-n") && next) {
+			if (tok === "--") {
+				const rest = tokens.slice(i + 1);
+				result.templateArgs = rest.join(" ");
+				result.positionals.push(tok, ...rest);
+				break;
+			} else if ((tok === "--name" || tok === "-n") && next) {
 				result.name = sanitize(next);
 				i++;
 			} else if ((tok === "--file" || tok === "-f") && next) {
 				result.file = next;
+				i++;
+			} else if ((tok === "--template" || tok === "--from") && next) {
+				result.template = next;
 				i++;
 			} else if (tok === "--sandbox" && next) {
 				if (isSandbox(next)) result.sandbox = next;
@@ -552,6 +692,23 @@ export default function codexGoalInteractive(pi: ExtensionAPI) {
 				result.all = true;
 			} else if (tok === "--yes" || tok === "-y") {
 				result.yes = true;
+			} else if (tok.startsWith("--") && tok.length > 2) {
+				const eq = tok.indexOf("=");
+				if (eq > 2) {
+					const key = tok.slice(2, eq);
+					result.templateValues[key] = tok.slice(eq + 1);
+					result.positionals.push(tok);
+				} else {
+					const key = tok.slice(2);
+					if (next && !next.startsWith("--")) {
+						result.templateValues[key] = next;
+						result.positionals.push(tok, next);
+						i++;
+					} else {
+						result.templateValues[key] = "true";
+						result.positionals.push(tok);
+					}
+				}
 			} else {
 				result.positionals.push(tok);
 			}
@@ -1056,11 +1213,11 @@ ${objective.trim()}
 
 	// --- command handlers ---------------------------------------------------
 
-	async function ensureGoalContent(ctx: ExtensionContext, name: string, taskFile: string, objective: string, edit: boolean) {
+	async function ensureGoalContent(ctx: ExtensionContext, name: string, taskFile: string, objective: string, edit: boolean, initialContent?: string) {
 		const fullPath = path.resolve(ctx.cwd, taskFile);
 		let content = tryRead(fullPath);
 		if (!content) {
-			content = objective.trim() ? taskFromObjective(name, objective) : DEFAULT_TEMPLATE;
+			content = initialContent ?? (objective.trim() ? taskFromObjective(name, objective) : DEFAULT_TEMPLATE);
 		}
 		if ((edit || !objective.trim()) && ctx.hasUI) {
 			const edited = await ctx.ui.editor(`Edit Codex goal: ${name}`, content);
@@ -1101,8 +1258,16 @@ ${objective.trim()}
 			return;
 		}
 
-		const objective = positionals.join(" ");
-		const content = await ensureGoalContent(ctx, name, taskFile, objective, args.edit);
+		let objective = positionals.join(" ");
+		let initialContent: string | undefined;
+		if (args.template) {
+			args.templateValues.name ??= name;
+			const resolved = resolveTemplate(ctx, args.template, args.templateValues, args.templateArgs);
+			objective = resolved.objective;
+			initialContent = taskContentFromResolvedTemplate(name, resolved);
+		}
+
+		const content = await ensureGoalContent(ctx, name, taskFile, objective, args.edit, initialContent);
 		if (content === null) {
 			notify(ctx, "Goal creation cancelled.", "info");
 			return;
@@ -1199,6 +1364,7 @@ ${objective.trim()}
 		}
 		const result = await runOneShot(ctx, goal, args);
 		notify(ctx, `codex /goal finished in ${formatDuration(result.durationMs)}:\n${truncateText(cleanMarkers(result.summary), 2500)}`, result.code === 0 ? "info" : "error");
+		sendOneShotContextMessage(ctx, goal, result);
 	}
 
 	function handleStop(_rest: string, ctx: ExtensionContext) {
@@ -1227,6 +1393,27 @@ ${objective.trim()}
 			return;
 		}
 		notify(ctx, `${archived ? "Archived" : "Codex"} goals:\n${goals.map((goal) => `  • ${formatGoal(goal)}`).join("\n")}`, "info");
+	}
+
+	function handleTemplates(rest: string, ctx: ExtensionContext) {
+		const query = rest.trim().toLowerCase();
+		const templates = discoverTemplates(ctx).filter((template) => {
+			if (!query) return true;
+			return (
+				template.name.toLowerCase().includes(query) ||
+				template.aliases.some((alias) => alias.toLowerCase().includes(query)) ||
+				template.description?.toLowerCase().includes(query)
+			);
+		});
+		if (templates.length === 0) {
+			notify(ctx, `No goal templates found. Add Markdown or text templates under ${TEMPLATE_DIRS.join(", ")}.`, "info");
+			return;
+		}
+		notify(ctx, `Goal templates:\n${templates.slice(0, 30).map((template) => `  • ${formatTemplate(template)}`).join("\n")}`, "info");
+	}
+
+	function taskContentFromResolvedTemplate(name: string, resolved: ResolvedTemplate): string {
+		return resolved.objective.startsWith("#") ? resolved.objective : taskFromObjective(name, resolved.objective);
 	}
 
 	function handleLog(rest: string, ctx: ExtensionContext) {
@@ -1361,6 +1548,73 @@ ${objective.trim()}
 		}
 	}
 
+	function sendManagedGoalContextMessage(ctx: ExtensionContext, state: GoalState, result: CodexRunResult): void {
+		const clean = truncateText(cleanMarkers(result.summary), 2500);
+		const lines = [
+			`Codex /goal "${state.name}" finished with status: ${state.status}.`,
+			`Task file: ${state.taskFile}`,
+			state.sessionId ? `Codex session: ${state.sessionId}` : undefined,
+			state.lastLogFile ? `Log: ${state.lastLogFile}` : undefined,
+			`Duration: ${formatDuration(result.durationMs)}`,
+			`Exit code: ${result.code ?? "signal"}`,
+			"",
+			"Summary:",
+			clean,
+		].filter((line): line is string => line !== undefined);
+
+		pi.sendMessage(
+			{
+				customType: GOAL_CONTEXT_MESSAGE_TYPE,
+				content: lines.join("\n"),
+				display: true,
+				details: {
+					kind: "managed",
+					name: state.name,
+					status: state.status,
+					taskFile: state.taskFile,
+					sessionId: state.sessionId,
+					logFile: state.lastLogFile,
+					durationMs: result.durationMs,
+					exitCode: result.code,
+				},
+			},
+			{ triggerTurn: false },
+		);
+	}
+
+	function sendOneShotContextMessage(ctx: ExtensionContext, goal: string, result: CodexRunResult): void {
+		const clean = truncateText(cleanMarkers(result.summary), 2500);
+		const status = result.code === 0 ? "completed" : "failed";
+		const logFile = path.relative(ctx.cwd, result.logFile);
+		const lines = [
+			`Codex /goal one-shot finished with status: ${status}.`,
+			`Objective: ${truncateText(goal, 500)}`,
+			`Log: ${logFile}`,
+			`Duration: ${formatDuration(result.durationMs)}`,
+			`Exit code: ${result.code ?? "signal"}`,
+			"",
+			"Summary:",
+			clean,
+		];
+
+		pi.sendMessage(
+			{
+				customType: GOAL_CONTEXT_MESSAGE_TYPE,
+				content: lines.join("\n"),
+				display: true,
+				details: {
+					kind: "one-shot",
+					status,
+					objective: goal,
+					logFile,
+					durationMs: result.durationMs,
+					exitCode: result.code,
+				},
+			},
+			{ triggerTurn: false },
+		);
+	}
+
 	function showRunResult(ctx: ExtensionContext, state: GoalState, result: CodexRunResult): void {
 		const clean = truncateText(cleanMarkers(result.summary), 2500);
 		const session = state.sessionId ? `\nSession: ${state.sessionId}` : "";
@@ -1368,6 +1622,7 @@ ${objective.trim()}
 		const duration = `\nDuration: ${formatDuration(result.durationMs)}`;
 		const level: NotifyLevel = state.status === "failed" ? "error" : "info";
 		notify(ctx, `Codex goal "${state.name}" ${state.status} in ${formatDuration(result.durationMs)}.${session}${log}${duration}\n\n${clean}`, level);
+		sendManagedGoalContextMessage(ctx, state, result);
 	}
 
 	const HELP = `Codex Goal - interactive Codex /goal sessions
@@ -1381,6 +1636,7 @@ Commands:
   /goal stop                           Abort/pause the current goal
   /goal status                         Show goals
   /goal list [--archived]              Show goals
+  /goal templates [query]              List reusable goal templates
   /goal log [name]                     Show last output/log path
   /goal edit [name]                    Edit the task file
   /goal cancel <name> [--all]          Delete goal state (and internal task file with --all)
@@ -1393,12 +1649,14 @@ Options:
   --timeout-ms N
   --model MODEL
   --profile PROFILE (start/run only)
+  --template NAME  Start from .pi-goals, .ai/.pi-goals, or .codex-goals/templates
   --edit        Open the generated/resume prompt in an editor first
   --no-run      Create the managed goal without launching Codex
   --force       Recreate/resume completed goal
 
 Examples:
   /goal start auth-refactor "Refactor auth and add tests" --sandbox workspace-write
+  /goal start release --template release/checklist --version 0.1.1 -- update docs
   /goal resume auth-refactor "Continue with failing tests"
   /goal status`;
 
@@ -1436,6 +1694,9 @@ Examples:
 					case "status":
 					case "list":
 						handleStatus(rest, ctx);
+						break;
+					case "templates":
+						handleTemplates(rest, ctx);
 						break;
 					case "log":
 						handleLog(rest, ctx);
@@ -1482,6 +1743,8 @@ Examples:
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const parsed: ParsedArgs = {
 				positionals: [],
+				templateValues: {},
+				templateArgs: "",
 				sandbox: (params.sandbox ?? DEFAULT_SANDBOX) as SandboxMode,
 				timeoutMs: params.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 				model: params.model,
@@ -1501,6 +1764,38 @@ Examples:
 	});
 
 	pi.registerTool({
+		name: "codex_goal_templates",
+		label: "List Codex Goal Templates",
+		description: "List reusable Codex /goal templates discovered from bounded workspace template directories.",
+		promptSnippet: "Inspect reusable Codex /goal templates before starting a managed goal from a project workflow.",
+		promptGuidelines: [
+			"Use this before codex_goal_start when the user refers to a reusable workflow by name.",
+			"Templates are discovered only under .pi-goals, .ai/.pi-goals, and .codex-goals/templates.",
+		],
+		parameters: Type.Object({
+			query: Type.Optional(Type.String({ description: "Optional case-insensitive name, alias, or description filter." })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const query = params.query?.toLowerCase();
+			const templates = discoverTemplates(ctx).filter((template) => {
+				if (!query) return true;
+				return (
+					template.name.toLowerCase().includes(query) ||
+					template.aliases.some((alias) => alias.toLowerCase().includes(query)) ||
+					template.description?.toLowerCase().includes(query)
+				);
+			});
+			const text = templates.length > 0
+				? templates.map(formatTemplate).join("\n")
+				: `No goal templates found. Add Markdown or text templates under ${TEMPLATE_DIRS.join(", ")}.`;
+			return {
+				content: [{ type: "text", text }],
+				details: { templates: templates.map(({ body, ...template }) => template) },
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "codex_goal_start",
 		label: "Start Codex Goal",
 		description: "Create a managed Codex /goal session with persistent state that can be resumed later.",
@@ -1511,7 +1806,10 @@ Examples:
 		],
 		parameters: Type.Object({
 			name: Type.String({ description: "Goal name, e.g. auth-refactor." }),
-			goal: Type.String({ description: "Goal content in markdown or plain text." }),
+			goal: Type.Optional(Type.String({ description: "Goal content in markdown or plain text. Optional when template is provided." })),
+			template: Type.Optional(Type.String({ description: "Reusable template name from .pi-goals, .ai/.pi-goals, or .codex-goals/templates." })),
+			templateValues: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Values for {{placeholder}} substitutions." })),
+			templateArgs: Type.Optional(Type.String({ description: "Text substituted into {{args}}." })),
 			run: Type.Optional(Type.Boolean({ description: "Launch Codex immediately. Defaults to true." })),
 			timeoutMs: Type.Optional(Type.Integer({ minimum: 5000, maximum: 3_600_000 })),
 			sandbox: Type.Optional(SandboxSchema),
@@ -1521,7 +1819,19 @@ Examples:
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const name = sanitize(params.name);
 			const taskFile = path.join(GOAL_DIR, `${name}.md`);
-			const content = params.goal.trim().startsWith("#") ? params.goal : taskFromObjective(name, params.goal);
+			let content: string;
+			if (params.template) {
+				const values = { ...(params.templateValues ?? {}), name };
+				const resolved = resolveTemplate(ctx, params.template, values, params.templateArgs ?? "");
+				content = taskContentFromResolvedTemplate(name, resolved);
+			} else if (params.goal?.trim()) {
+				content = params.goal.trim().startsWith("#") ? params.goal : taskFromObjective(name, params.goal);
+			} else {
+				return {
+					content: [{ type: "text", text: "Provide either goal or template when starting a Codex goal." }],
+					details: {},
+				};
+			}
 			writeFile(path.resolve(ctx.cwd, taskFile), content);
 			const state: GoalState = {
 				version: 1,

@@ -35,6 +35,7 @@ If you still have an older global extension that registers `/goal`, Pi may suffi
 /goal resume [name] [prompt]         Resume a managed Codex session
 /goal stop                           Abort/pause current goal
 /goal status                         Show goals
+/goal templates [query]              List reusable goal templates
 /goal log [name]                     Show last output/log path
 /goal edit [name]                    Edit the task file
 /goal cancel <name> [--all]          Delete state
@@ -43,11 +44,41 @@ If you still have an older global extension that registers `/goal`, Pi may suffi
 /goal nuke [--yes]                   Delete all .codex-goals data
 ```
 
-Managed goals store lightweight state under `.codex-goals/` and Codex JSONL transcripts under `.codex-goals/logs/`.
+Managed goals store lightweight state under `.codex-goals/` and Codex JSONL transcripts under `.codex-goals/logs/`. When a manually-run `/goal` finishes, the extension appends a compact result message to the Pi session so the next Pi turn has the Codex outcome in context.
+
+## Reusable templates
+
+Store Markdown or text goal templates under one of these workspace-root directories:
+
+```text
+.pi-goals/
+.ai/.pi-goals/
+.codex-goals/templates/
+```
+
+Templates support simple frontmatter plus `{{placeholder}}` and `{{args}}` substitution:
+
+```markdown
+---
+description: Fix an issue with verification
+aliases: fix, issue
+---
+Fix {{issue}}.
+
+Extra context: {{args}}
+```
+
+Start a managed Codex goal from a template:
+
+```text
+/goal templates
+/goal start fix-123 --template fix-issue --issue ISSUE-123 -- update docs too
+```
 
 ## Agent tools
 
 - `codex_goal_run` - one-shot Codex goal.
+- `codex_goal_templates` - list reusable templates.
 - `codex_goal_start` - create a managed goal and optionally launch Codex.
 - `codex_goal_resume` - resume a managed goal by name.
 
