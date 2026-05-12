@@ -29,19 +29,3 @@ npm run check
 npm run pack:dry-run
 ```
 
-## publish
-
-Publishing is handled by `.github/workflows/publish.yml`.
-
-Set the repository secret `NPM_TOKEN` to an npm automation token. After that, bump the package version and push to `main`. The workflow runs checks, verifies the package contents, and publishes any package version that is not already on npm.
-
-You can also run it by hand from GitHub Actions.
-
-Local publish still works:
-
-```bash
-npm run publish:goal
-npm run publish:queue
-# or
-npm run publish:all
-```

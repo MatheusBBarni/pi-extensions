@@ -264,7 +264,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	function pump(ctx: ExtensionContext) {
 		updateUi(ctx);
 		if (dispatching || paused || queue.length === 0) return;
-		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+		if (ctx.hasPendingMessages()) return;
 
 		const next = queue.shift();
 		if (!next) return;
@@ -274,7 +274,11 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		updateUi(ctx, `sending #${next.id}`);
 
 		try {
-			pi.sendUserMessage(next.text);
+			if (ctx.isIdle()) {
+				pi.sendUserMessage(next.text);
+			} else {
+				pi.sendUserMessage(next.text, { deliverAs: "followUp" });
+			}
 		} catch (error) {
 			queue.unshift(next);
 			dispatching = false;
