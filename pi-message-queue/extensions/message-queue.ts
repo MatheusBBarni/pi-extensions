@@ -118,7 +118,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	let nextId = 1;
 	let widgetVisible = true;
 	let dispatching = false;
-	let pumpScheduled = false;
+	let pumpHandle: ReturnType<typeof setImmediate> | undefined;
 
 	function snapshot(): QueueStateSnapshot {
 		return {
@@ -177,7 +177,8 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		nextId = 1;
 		widgetVisible = true;
 		dispatching = false;
-		pumpScheduled = false;
+		if (pumpHandle) clearImmediate(pumpHandle);
+		pumpHandle = undefined;
 
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== STATE_ENTRY_TYPE) continue;
@@ -253,10 +254,9 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	}
 
 	function schedulePump(ctx: ExtensionContext) {
-		if (pumpScheduled) return;
-		pumpScheduled = true;
-		queueMicrotask(() => {
-			pumpScheduled = false;
+		if (pumpHandle) return;
+		pumpHandle = setImmediate(() => {
+			pumpHandle = undefined;
 			pump(ctx);
 		});
 	}
@@ -264,7 +264,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	function pump(ctx: ExtensionContext) {
 		updateUi(ctx);
 		if (dispatching || paused || queue.length === 0) return;
-		if (ctx.hasPendingMessages()) return;
+		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
 
 		const next = queue.shift();
 		if (!next) return;
@@ -274,11 +274,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		updateUi(ctx, `sending #${next.id}`);
 
 		try {
-			if (ctx.isIdle()) {
-				pi.sendUserMessage(next.text);
-			} else {
-				pi.sendUserMessage(next.text, { deliverAs: "followUp" });
-			}
+			pi.sendUserMessage(next.text);
 		} catch (error) {
 			queue.unshift(next);
 			dispatching = false;
@@ -417,7 +413,8 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		dispatching = false;
-		pumpScheduled = false;
+		if (pumpHandle) clearImmediate(pumpHandle);
+		pumpHandle = undefined;
 	});
 
 	pi.registerCommand("queue", {
