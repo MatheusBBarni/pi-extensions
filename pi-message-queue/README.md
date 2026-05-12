@@ -50,7 +50,8 @@ Shortcut:
 ## Behavior
 
 - Queued messages are shown in a compact below-editor widget similar to Pi's built-in follow-up queue display.
-- Ordinary user messages submitted while Pi is working are captured into this persistent queue instead of Pi's native steering/follow-up queue.
+- Ordinary user messages and slash commands submitted while Pi is working are captured into this persistent queue instead of Pi's native steering/follow-up queue.
+- Skill invocations such as `/skill:git-commit feat` and prompt templates are expanded when dispatched.
 - Typing `/new` or `/reload` while Pi is working also queues those commands instead of showing Pi's built-in wait warning.
 - Queued messages are sent only when Pi is idle and there are no native Pi pending messages.
 - Queued `/new` and `/reload` entries run Pi's built-in commands instead of being sent to the agent as prompt text.

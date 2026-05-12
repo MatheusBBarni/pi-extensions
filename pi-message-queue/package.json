@@ -1,6 +1,6 @@
 {
   "name": "@matheusbbarni/pi-message-queue",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "A Pi extension for queueing user messages and sending them one after another.",
   "type": "module",
   "publishConfig": {

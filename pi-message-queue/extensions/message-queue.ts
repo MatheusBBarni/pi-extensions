@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import {
 	CustomEditor,
+	stripFrontmatter,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
@@ -91,6 +94,15 @@ function getQueuedBuiltinCommand(text: string): QueuedBuiltinCommand | undefined
 	return undefined;
 }
 
+function parseSlashCommand(text: string): { name: string; args: string } | undefined {
+	const trimmed = text.trim();
+	if (!trimmed.startsWith("/")) return undefined;
+	const spaceIndex = trimmed.indexOf(" ");
+	const name = spaceIndex === -1 ? trimmed.slice(1) : trimmed.slice(1, spaceIndex);
+	const args = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim();
+	return name ? { name, args } : undefined;
+}
+
 function hasCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
 	return (
 		"newSession" in ctx &&
@@ -105,15 +117,18 @@ class MessageQueueEditor extends CustomEditor {
 		tui: TUI,
 		theme: EditorTheme,
 		private readonly keybindingsManager: KeybindingsManager,
-		private readonly queueBuiltinCommand: (text: string) => boolean,
+		private readonly queueInput: (text: string) => boolean,
 	) {
 		super(tui, theme, keybindingsManager);
 	}
 
 	handleInput(data: string): void {
-		if (this.keybindingsManager.matches(data, "tui.input.submit") && !this.isShowingAutocomplete()) {
+		const isSubmit =
+			this.keybindingsManager.matches(data, "tui.input.submit") ||
+			this.keybindingsManager.matches(data, "app.message.followUp");
+		if (isSubmit && !this.isShowingAutocomplete()) {
 			const text = this.getExpandedText();
-			if (this.queueBuiltinCommand(text)) {
+			if (this.queueInput(text)) {
 				this.setText("");
 				return;
 			}
@@ -121,6 +136,45 @@ class MessageQueueEditor extends CustomEditor {
 
 		super.handleInput(data);
 	}
+}
+
+function parseCommandArgs(argsString: string): string[] {
+	const args: string[] = [];
+	let current = "";
+	let inQuote: string | undefined;
+
+	for (const char of argsString) {
+		if (inQuote) {
+			if (char === inQuote) inQuote = undefined;
+			else current += char;
+		} else if (char === '"' || char === "'") {
+			inQuote = char;
+		} else if (char === " " || char === "\t") {
+			if (current) {
+				args.push(current);
+				current = "";
+			}
+		} else {
+			current += char;
+		}
+	}
+
+	if (current) args.push(current);
+	return args;
+}
+
+function substitutePromptArgs(content: string, args: string[]): string {
+	let result = content;
+	result = result.replace(/\$(\d+)/g, (_match, num: string) => args[Number.parseInt(num, 10) - 1] ?? "");
+	result = result.replace(/\$\{@:(\d+)(?::(\d+))?\}/g, (_match, startStr: string, lengthStr: string | undefined) => {
+		const start = Math.max(0, Number.parseInt(startStr, 10) - 1);
+		if (lengthStr) return args.slice(start, start + Number.parseInt(lengthStr, 10)).join(" ");
+		return args.slice(start).join(" ");
+	});
+	const allArgs = args.join(" ");
+	result = result.replace(/\$ARGUMENTS/g, allArgs);
+	result = result.replace(/\$@/g, allArgs);
+	return result;
 }
 
 function splitCommand(args: string): { command: string; rest: string } {
@@ -349,10 +403,34 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		return lastCommandCtx;
 	}
 
-	function queueBuiltinCommandWhileWorking(text: string, ctx: ExtensionContext): boolean {
+	function expandQueuedSlashCommand(text: string): string | undefined {
+		const parsed = parseSlashCommand(text);
+		if (!parsed) return text;
+
+		const command = pi.getCommands().find((candidate) => candidate.name === parsed.name);
+		if (!command) return undefined;
+
+		const filePath = command.sourceInfo.path;
+		if (command.source === "skill") {
+			const body = stripFrontmatter(readFileSync(filePath, "utf8")).trim();
+			const skillName = parsed.name.startsWith("skill:") ? parsed.name.slice("skill:".length) : parsed.name;
+			const baseDir = command.sourceInfo.baseDir ?? dirname(filePath);
+			const skillBlock = `<skill name="${skillName}" location="${filePath}">\nReferences are relative to ${baseDir}.\n\n${body}\n</skill>`;
+			return parsed.args ? `${skillBlock}\n\n${parsed.args}` : skillBlock;
+		}
+
+		if (command.source === "prompt") {
+			const body = stripFrontmatter(readFileSync(filePath, "utf8"));
+			return substitutePromptArgs(body, parseCommandArgs(parsed.args));
+		}
+
+		return undefined;
+	}
+
+	function queueInputWhileWorking(text: string, ctx: ExtensionContext): boolean {
 		const trimmed = text.trim();
 		const isWorking = !ctx.isIdle() || ctx.hasPendingMessages();
-		if (!isWorking || !getQueuedBuiltinCommand(trimmed)) return false;
+		if (!isWorking || !trimmed) return false;
 
 		const item = enqueue(trimmed, "back", ctx);
 		if (item) {
@@ -426,6 +504,18 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			return;
 		}
 
+		const messageText = expandQueuedSlashCommand(next.text);
+		if (messageText === undefined) {
+			queue.shift();
+			persist();
+			updateUi(ctx, `restored #${next.id}`);
+			if (ctx.hasUI && !ctx.ui.getEditorText().trim()) {
+				ctx.ui.setEditorText(next.text);
+			}
+			ctx.ui.notify(`Queued slash command #${next.id} needs interactive execution; restored it to the editor.`, "warning");
+			return;
+		}
+
 		const blocker = getDispatchBlocker(ctx);
 		if (blocker) {
 			ctx.ui.notify(blocker, "warning");
@@ -436,7 +526,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		updateUi(ctx, `sending #${next.id}`);
 
 		try {
-			pi.sendUserMessage(next.text);
+			pi.sendUserMessage(messageText);
 		} catch (error) {
 			dispatching = undefined;
 			updateUi(ctx, `failed to send #${next.id}`);
@@ -573,7 +663,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		restore(ctx);
 		ctx.ui.setEditorComponent((tui, theme, keybindings) =>
-			new MessageQueueEditor(tui, theme, keybindings, (text) => queueBuiltinCommandWhileWorking(text, ctx)),
+			new MessageQueueEditor(tui, theme, keybindings, (text) => queueInputWhileWorking(text, ctx)),
 		);
 		schedulePump(ctx);
 	});
@@ -588,19 +678,8 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("input", async (event, ctx) => {
-		const text = event.text.trim();
-		const isWorking = !ctx.isIdle() || ctx.hasPendingMessages();
-		if (event.source === "extension" || !isWorking || !text || text.startsWith("/")) {
-			return { action: "continue" };
-		}
-
-		const item = enqueue(text, "back", ctx);
-		if (item) {
-			ctx.ui.notify(`Queued #${item.id} while Pi is working.`, "info");
-			schedulePump(ctx);
-		}
-
-		return { action: "handled" };
+		if (event.source === "extension") return { action: "continue" };
+		return queueInputWhileWorking(event.text, ctx) ? { action: "handled" } : { action: "continue" };
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
