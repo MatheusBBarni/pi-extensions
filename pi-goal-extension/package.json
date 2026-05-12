@@ -1,0 +1,29 @@
+{
+  "name": "@matheusbbarni/pi-goal-extension",
+  "version": "0.1.0",
+  "description": "Interactive Codex /goal sessions for Pi with persistent start/resume/status commands.",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "codex",
+    "goal"
+  ],
+  "pi": {
+    "extensions": [
+      "index.ts"
+    ],
+    "skills": [
+      "SKILL.md"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

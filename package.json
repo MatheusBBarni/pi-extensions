@@ -1,0 +1,18 @@
+{
+  "name": "pi-extensions",
+  "version": "0.1.0",
+  "private": true,
+  "description": "My day-to-day Pi extensions.",
+  "type": "module",
+  "workspaces": [
+    "pi-goal-extension",
+    "pi-message-queue"
+  ],
+  "scripts": {
+    "check": "npm run typecheck --workspaces --if-present",
+    "pack:dry-run": "npm pack --workspaces --dry-run",
+    "publish:goal": "npm publish --workspace @matheusbbarni/pi-goal-extension --access public",
+    "publish:queue": "npm publish --workspace @matheusbbarni/pi-message-queue --access public",
+    "publish:all": "npm run publish:goal && npm run publish:queue"
+  }
+}

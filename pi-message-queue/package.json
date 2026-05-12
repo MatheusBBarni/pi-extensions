@@ -1,0 +1,32 @@
+{
+  "name": "@matheusbbarni/pi-message-queue",
+  "version": "0.1.0",
+  "description": "A Pi extension for queueing user messages and sending them one after another.",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "message-queue",
+    "queue"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

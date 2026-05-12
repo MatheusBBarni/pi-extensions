@@ -1,0 +1,4 @@
+node_modules/
+.codex-goals/
+.DS_Store
+*.log
