@@ -6,13 +6,15 @@
   "type": "module",
   "workspaces": [
     "pi-goal-extension",
-    "pi-message-queue"
+    "pi-message-queue",
+    "pi-stitch-mcp"
   ],
   "scripts": {
     "check": "npm run typecheck --workspaces --if-present",
     "pack:dry-run": "npm pack --workspaces --dry-run",
     "publish:goal": "npm publish --workspace @matheusbbarni/pi-goal-extension --access public",
     "publish:queue": "npm publish --workspace @matheusbbarni/pi-message-queue --access public",
-    "publish:all": "npm run publish:goal && npm run publish:queue"
+    "publish:stitch": "npm publish --workspace @matheusbbarni/pi-stitch-mcp --access public",
+    "publish:all": "npm run publish:goal && npm run publish:queue && npm run publish:stitch"
   }
 }

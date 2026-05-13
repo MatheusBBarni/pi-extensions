@@ -9,6 +9,7 @@ on:
       - package-lock.json
       - pi-goal-extension/**
       - pi-message-queue/**
+      - pi-stitch-mcp/**
       - .github/workflows/publish.yml
   workflow_dispatch:
 
@@ -50,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for package_json in pi-goal-extension/package.json pi-message-queue/package.json; do
+          for package_json in pi-goal-extension/package.json pi-message-queue/package.json pi-stitch-mcp/package.json; do
             name=$(node -p "require('./${package_json}').name")
             version=$(node -p "require('./${package_json}').version")
 

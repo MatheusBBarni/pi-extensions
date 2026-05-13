@@ -1,0 +1,7 @@
+config.json
+.env
+.env.*
+node_modules/
+*.tgz
+package-lock.json
+tsconfig.json
