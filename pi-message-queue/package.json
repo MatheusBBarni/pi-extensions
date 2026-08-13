@@ -1,6 +1,6 @@
 {
   "name": "@matheusbbarni/pi-message-queue",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "A Pi extension for queueing user messages and sending them one after another.",
   "type": "module",
   "publishConfig": {
@@ -19,7 +19,8 @@
     ]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npx --yes tsx --test tests/*.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
