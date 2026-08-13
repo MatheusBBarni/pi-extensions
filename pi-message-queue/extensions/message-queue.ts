@@ -9,69 +9,24 @@ import {
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
+import {
+	QueueEngine,
+	restoreSnapshot,
+	STATE_VERSION,
+	workingInputIntent,
+	type QueuedBuiltinCommandName,
+	type QueuedMessage,
+	type QueuePosition,
+} from "./queue-engine.js";
 
 const STATE_ENTRY_TYPE = "pi-message-queue:state";
 const STATUS_KEY = "pi-message-queue";
 const WIDGET_KEY = "pi-message-queue:widget";
-const STATE_VERSION = 1;
 const MAX_WIDGET_ITEMS = 5;
 const MAX_PREVIEW_LENGTH = 96;
+const SEND_CONFIRM_MS = 2000;
 
-type QueuePosition = "back" | "front";
-type QueuedBuiltinCommand = { name: "new" | "reload" };
-
-interface QueuedMessage {
-	id: number;
-	text: string;
-	createdAt: string;
-}
-
-interface QueueStateSnapshot {
-	version: 1;
-	queue: QueuedMessage[];
-	paused: boolean;
-	nextId: number;
-	widgetVisible: boolean;
-	updatedAt: string;
-}
-
-interface PendingDispatch {
-	id: number;
-	accepted: boolean;
-}
-
-function isQueuedMessage(value: unknown): value is QueuedMessage {
-	if (!value || typeof value !== "object") return false;
-	const msg = value as Partial<QueuedMessage>;
-	return (
-		typeof msg.id === "number" &&
-		Number.isInteger(msg.id) &&
-		msg.id > 0 &&
-		typeof msg.text === "string" &&
-		msg.text.trim().length > 0 &&
-		typeof msg.createdAt === "string"
-	);
-}
-
-function restoreSnapshot(data: unknown): QueueStateSnapshot | undefined {
-	if (!data || typeof data !== "object") return undefined;
-	const snapshot = data as Partial<QueueStateSnapshot>;
-	if (snapshot.version !== STATE_VERSION) return undefined;
-	if (!Array.isArray(snapshot.queue)) return undefined;
-
-	const queue = snapshot.queue.filter(isQueuedMessage);
-	const maxId = queue.reduce((max, item) => Math.max(max, item.id), 0);
-	const parsedNextId = typeof snapshot.nextId === "number" && Number.isInteger(snapshot.nextId) ? snapshot.nextId : 1;
-
-	return {
-		version: STATE_VERSION,
-		queue,
-		paused: snapshot.paused === true,
-		nextId: Math.max(parsedNextId, maxId + 1, 1),
-		widgetVisible: snapshot.widgetVisible !== false,
-		updatedAt: typeof snapshot.updatedAt === "string" ? snapshot.updatedAt : new Date().toISOString(),
-	};
-}
+type QueuedBuiltinCommand = { name: QueuedBuiltinCommandName };
 
 function preview(text: string, maxLength = MAX_PREVIEW_LENGTH): string {
 	const singleLine = text.replace(/\s+/g, " ").trim();
@@ -112,6 +67,11 @@ function hasCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContex
 	);
 }
 
+function notify(ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info") {
+	if (!ctx.hasUI) return;
+	ctx.ui.notify(message, type);
+}
+
 class MessageQueueEditor extends CustomEditor {
 	constructor(
 		tui: TUI,
@@ -128,8 +88,7 @@ class MessageQueueEditor extends CustomEditor {
 	}
 
 	handleInput(data: string): void {
-		const isFollowUp = this.keybindingsManager.matches(data, "app.message.followUp");
-		if (isFollowUp) {
+		if (this.keybindingsManager.matches(data, "app.message.followUp")) {
 			const text = this.getExpandedText();
 			if (this.queueInput(text)) {
 				this.setText("");
@@ -137,23 +96,7 @@ class MessageQueueEditor extends CustomEditor {
 			}
 		}
 
-		if (!this.keybindingsManager.matches(data, "tui.input.submit")) {
-			super.handleInput(data);
-			return;
-		}
-
-		const originalOnSubmit = this.onSubmit;
-		this.onSubmit = (text) => {
-			if (!this.queueInput(text)) {
-				originalOnSubmit?.(text);
-			}
-		};
-
-		try {
-			super.handleInput(data);
-		} finally {
-			this.onSubmit = originalOnSubmit;
-		}
+		super.handleInput(data);
 	}
 }
 
@@ -238,42 +181,28 @@ function splitCommand(args: string): { command: string; rest: string } {
 }
 
 export default function messageQueueExtension(pi: ExtensionAPI) {
-	let queue: QueuedMessage[] = [];
-	let paused = false;
-	let nextId = 1;
-	let widgetVisible = true;
-	let dispatching: PendingDispatch | undefined;
+	const engine = new QueueEngine();
 	let pumpHandle: ReturnType<typeof setImmediate> | undefined;
+	let sendWatchdog: ReturnType<typeof setTimeout> | undefined;
 	let activeEditor: MessageQueueEditor | undefined;
-	// pi.sendUserMessage intentionally bypasses slash-command dispatch. Keep the latest
-	// /queue command context so delayed built-in commands can use Pi's command API once idle.
+	// Only the current session's command context is usable. Session replacement
+	// invalidates this handle so later /new and /reload cannot call a stale ctx.
 	let lastCommandCtx: ExtensionCommandContext | undefined;
 	const commandContextNoticeIds = new Set<number>();
 
-	function snapshot(): QueueStateSnapshot {
-		return {
-			version: STATE_VERSION,
-			queue: [...queue],
-			paused,
-			nextId,
-			widgetVisible,
-			updatedAt: new Date().toISOString(),
-		};
-	}
-
 	function persist() {
-		pi.appendEntry(STATE_ENTRY_TYPE, snapshot());
+		pi.appendEntry(STATE_ENTRY_TYPE, engine.snapshot());
 	}
 
-	function updateUi(ctx: ExtensionContext, _note?: string) {
+	function updateUi(ctx: ExtensionContext) {
 		if (!ctx.hasUI) return;
 
 		const theme = ctx.ui.theme;
-		const count = queue.length;
+		const count = engine.queue.length;
 		if (count === 0) {
-			const status = dispatching
+			const status = engine.isSending()
 				? theme.fg("accent", "↗ queue sending")
-				: paused
+				: engine.paused
 					? theme.fg("warning", "queue paused")
 					: undefined;
 			ctx.ui.setStatus(STATUS_KEY, status);
@@ -281,24 +210,24 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		const statusTone = paused ? "warning" : dispatching ? "accent" : "muted";
-		const statusText = `${paused ? "⏸" : dispatching ? "↗" : "↦"} queue ${count}`;
+		const statusTone = engine.paused ? "warning" : engine.isSending() ? "accent" : "muted";
+		const statusText = `${engine.paused ? "⏸" : engine.isSending() ? "↗" : "↦"} queue ${count}`;
 		ctx.ui.setStatus(STATUS_KEY, theme.fg(statusTone, statusText));
 
-		if (!widgetVisible) {
+		if (!engine.widgetVisible) {
 			ctx.ui.setWidget(WIDGET_KEY, undefined, { placement: "belowEditor" });
 			return;
 		}
 
-		const titleText = `Queued follow-up inputs${paused ? " (paused)" : ""}`;
-		const lines = [`${theme.fg("dim", "•")} ${theme.bold(theme.fg(paused ? "warning" : "text", titleText))}`];
+		const titleText = `Queued follow-up inputs${engine.paused ? " (paused)" : ""}`;
+		const lines = [`${theme.fg("dim", "•")} ${theme.bold(theme.fg(engine.paused ? "warning" : "text", titleText))}`];
 
-		for (const item of queue.slice(0, MAX_WIDGET_ITEMS)) {
+		for (const item of engine.queue.slice(0, MAX_WIDGET_ITEMS)) {
 			lines.push(`  ${theme.fg("dim", "↳")} ${theme.fg("muted", theme.italic(preview(item.text)))}`);
 		}
 
-		if (queue.length > MAX_WIDGET_ITEMS) {
-			lines.push(theme.fg("dim", `  … ${queue.length - MAX_WIDGET_ITEMS} more queued inputs`));
+		if (engine.queue.length > MAX_WIDGET_ITEMS) {
+			lines.push(theme.fg("dim", `  … ${engine.queue.length - MAX_WIDGET_ITEMS} more queued inputs`));
 		}
 
 		lines.push(theme.fg("dim", "    shift + ← edit last queued message"));
@@ -306,87 +235,89 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		ctx.ui.setWidget(WIDGET_KEY, lines, { placement: "belowEditor" });
 	}
 
-	function restore(ctx: ExtensionContext) {
-		queue = [];
-		paused = false;
-		nextId = 1;
-		widgetVisible = true;
-		dispatching = undefined;
-		lastCommandCtx = undefined;
-		commandContextNoticeIds.clear();
-		if (pumpHandle) clearImmediate(pumpHandle);
+	function clearSendWatchdog() {
+		if (!sendWatchdog) return;
+		clearTimeout(sendWatchdog);
+		sendWatchdog = undefined;
+	}
+
+	function clearPump() {
+		if (!pumpHandle) return;
+		clearImmediate(pumpHandle);
 		pumpHandle = undefined;
+	}
+
+	function forgetCommandContext() {
+		lastCommandCtx = undefined;
+		engine.invalidateCommandContext();
+	}
+
+	function rememberCommandContext(ctx: ExtensionCommandContext) {
+		lastCommandCtx = ctx;
+		engine.rememberLiveCommandContext();
+	}
+
+	function getCommandContext(ctx: ExtensionContext): ExtensionCommandContext | undefined {
+		if (hasCommandContext(ctx)) {
+			rememberCommandContext(ctx);
+			return ctx;
+		}
+
+		if (lastCommandCtx && engine.hasLiveCommandContext()) return lastCommandCtx;
+		return undefined;
+	}
+
+	function restore(ctx: ExtensionContext) {
+		engine.reset();
+		commandContextNoticeIds.clear();
+		forgetCommandContext();
+		clearSendWatchdog();
+		clearPump();
 
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== STATE_ENTRY_TYPE) continue;
 			const restored = restoreSnapshot(entry.data);
 			if (!restored) continue;
-			queue = restored.queue;
-			paused = restored.paused;
-			nextId = restored.nextId;
-			widgetVisible = restored.widgetVisible;
+			engine.restoreFrom(restored);
 		}
 
 		updateUi(ctx);
 	}
 
 	function enqueue(text: string, position: QueuePosition, ctx: ExtensionContext): QueuedMessage | undefined {
-		const trimmed = text.trim();
-		if (!trimmed) {
-			ctx.ui.notify("Nothing to queue.", "warning");
+		const item = engine.enqueue(text, position);
+		if (!item) {
+			notify(ctx, "Nothing to queue.", "warning");
 			return undefined;
 		}
 
-		const item: QueuedMessage = {
-			id: nextId++,
-			text: trimmed,
-			createdAt: new Date().toISOString(),
-		};
-
-		if (position === "front") queue.unshift(item);
-		else queue.push(item);
-
 		persist();
-		updateUi(ctx, position === "front" ? `queued #${item.id} at front` : `queued #${item.id}`);
+		updateUi(ctx);
 		return item;
-	}
-
-	function removeQueued(selector: string): QueuedMessage | undefined {
-		const trimmed = selector.trim();
-		if (!trimmed) return undefined;
-
-		let index = -1;
-		if (trimmed.startsWith("#")) {
-			const id = Number.parseInt(trimmed.slice(1), 10);
-			if (Number.isInteger(id)) index = queue.findIndex((item) => item.id === id);
-		} else {
-			const position = Number.parseInt(trimmed, 10);
-			if (Number.isInteger(position) && position > 0) index = position - 1;
-		}
-
-		if (index < 0 || index >= queue.length) return undefined;
-		const [removed] = queue.splice(index, 1);
-		return removed;
 	}
 
 	function editLastQueued(ctx: ExtensionContext): boolean {
 		if (!ctx.hasUI) return false;
-		const last = queue.at(-1);
-		if (!last) {
-			ctx.ui.notify("No queued messages to edit.", "info");
+		if (!engine.queue.some((item) => !engine.isInFlight(item.id))) {
+			notify(ctx, "No queued messages to edit.", "info");
 			return false;
 		}
 
 		if (ctx.ui.getEditorText().trim()) {
-			ctx.ui.notify("Clear the editor before editing a queued message.", "warning");
+			notify(ctx, "Clear the editor before editing a queued message.", "warning");
 			return false;
 		}
 
-		queue.pop();
+		const last = engine.popLastEditable();
+		if (!last) {
+			notify(ctx, "No queued messages to edit.", "info");
+			return false;
+		}
+
 		persist();
 		ctx.ui.setEditorText(last.text);
-		updateUi(ctx, `editing #${last.id}`);
-		ctx.ui.notify(`Restored queued message #${last.id} to the editor.`, "info");
+		updateUi(ctx);
+		notify(ctx, `Restored queued message #${last.id} to the editor.`, "info");
 		return true;
 	}
 
@@ -394,7 +325,13 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		if (pumpHandle) return;
 		pumpHandle = setImmediate(() => {
 			pumpHandle = undefined;
-			void pump(ctx);
+			void pump(ctx).catch((error) => {
+				const message = error instanceof Error ? error.message : String(error);
+				engine.failSend();
+				persist();
+				updateUi(ctx);
+				notify(ctx, `Message queue paused after an unexpected error: ${message}`, "error");
+			});
 		});
 	}
 
@@ -410,19 +347,6 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		return undefined;
 	}
 
-	function rememberCommandContext(ctx: ExtensionCommandContext) {
-		lastCommandCtx = ctx;
-	}
-
-	function getCommandContext(ctx: ExtensionContext): ExtensionCommandContext | undefined {
-		if (hasCommandContext(ctx)) {
-			rememberCommandContext(ctx);
-			return ctx;
-		}
-
-		return lastCommandCtx;
-	}
-
 	function expandQueuedSlashCommand(text: string): string | undefined {
 		const parsed = parseSlashCommand(text);
 		if (!parsed) return text;
@@ -431,17 +355,21 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		if (!command) return undefined;
 
 		const filePath = command.sourceInfo.path;
-		if (command.source === "skill") {
-			const body = stripFrontmatter(readFileSync(filePath, "utf8")).trim();
-			const skillName = parsed.name.startsWith("skill:") ? parsed.name.slice("skill:".length) : parsed.name;
-			const baseDir = command.sourceInfo.baseDir ?? dirname(filePath);
-			const skillBlock = `<skill name="${skillName}" location="${filePath}">\nReferences are relative to ${baseDir}.\n\n${body}\n</skill>`;
-			return parsed.args ? `${skillBlock}\n\n${parsed.args}` : skillBlock;
-		}
+		try {
+			if (command.source === "skill") {
+				const body = stripFrontmatter(readFileSync(filePath, "utf8")).trim();
+				const skillName = parsed.name.startsWith("skill:") ? parsed.name.slice("skill:".length) : parsed.name;
+				const baseDir = command.sourceInfo.baseDir ?? dirname(filePath);
+				const skillBlock = `<skill name="${skillName}" location="${filePath}">\nReferences are relative to ${baseDir}.\n\n${body}\n</skill>`;
+				return parsed.args ? `${skillBlock}\n\n${parsed.args}` : skillBlock;
+			}
 
-		if (command.source === "prompt") {
-			const body = stripFrontmatter(readFileSync(filePath, "utf8"));
-			return substitutePromptArgs(body, parseCommandArgs(parsed.args));
+			if (command.source === "prompt") {
+				const body = stripFrontmatter(readFileSync(filePath, "utf8"));
+				return substitutePromptArgs(body, parseCommandArgs(parsed.args));
+			}
+		} catch {
+			return undefined;
 		}
 
 		return undefined;
@@ -454,89 +382,120 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 		const item = enqueue(trimmed, "back", ctx);
 		if (item) {
-			ctx.ui.notify(`Queued #${item.id} while Pi is working.`, "info");
+			notify(ctx, `Queued #${item.id} while Pi is working.`, "info");
 			schedulePump(ctx);
 		}
 		return true;
 	}
 
-	function dequeueForCommandDispatch(item: QueuedMessage, ctx: ExtensionContext, commandName: string): boolean {
-		const current = queue[0];
-		if (!current || current.id !== item.id) return false;
-
-		queue.shift();
-		commandContextNoticeIds.delete(item.id);
-		persist();
-		updateUi(ctx, `running /${commandName}`);
-		ctx.ui.notify(`Running queued /${commandName}.`, "info");
-		return true;
-	}
-
-	function requeueFailedCommand(item: QueuedMessage, ctx: ExtensionContext, commandName: string, note: string) {
-		queue.unshift(item);
-		persist();
-		updateUi(ctx, `failed to run /${commandName}`);
-		ctx.ui.notify(`Message queue failed to run /${commandName}: ${note}`, "error");
+	function startSendWatchdog(ctx: ExtensionContext, id: number) {
+		clearSendWatchdog();
+		sendWatchdog = setTimeout(() => {
+			sendWatchdog = undefined;
+			if (!engine.dispatching || engine.dispatching.accepted || engine.dispatching.id !== id) return;
+			engine.failSend();
+			persist();
+			updateUi(ctx);
+			notify(ctx, `Message queue paused because #${id} was not accepted by Pi.`, "error");
+		}, SEND_CONFIRM_MS);
 	}
 
 	async function dispatchQueuedBuiltinCommand(
 		item: QueuedMessage,
 		command: QueuedBuiltinCommand,
 		ctx: ExtensionContext,
-	): Promise<boolean> {
+	): Promise<void> {
 		const commandCtx = getCommandContext(ctx);
 		if (commandCtx) {
-			if (!dequeueForCommandDispatch(item, ctx, command.name)) return true;
+			const prepared = engine.prepareBuiltinCommand(command.name);
+			if (prepared.action === "blocked" || !prepared.item) return;
+
+			commandContextNoticeIds.delete(item.id);
+			persist();
+			updateUi(ctx);
+			notify(ctx, `Running queued /${command.name}.`, "info");
 
 			try {
 				if (command.name === "new") {
-					const result = await commandCtx.newSession();
+					const result = await commandCtx.newSession({
+						setup: async (sessionManager) => {
+							if (prepared.handoffQueue.length === 0) return;
+							sessionManager.appendCustomEntry(STATE_ENTRY_TYPE, {
+								version: STATE_VERSION,
+								queue: prepared.handoffQueue,
+								paused: false,
+								nextId: engine.nextId,
+								widgetVisible: engine.widgetVisible,
+								updatedAt: new Date().toISOString(),
+							});
+						},
+					});
 					if (result.cancelled) {
-						queue.unshift(item);
+						engine.requeue(prepared.item, prepared.handoffQueue);
 						persist();
-						updateUi(ctx, "cancelled /new");
-						ctx.ui.notify("Queued /new was cancelled.", "warning");
+						updateUi(ctx);
+						notify(ctx, "Queued /new was cancelled.", "warning");
+						return;
 					}
-					return true;
+
+					forgetCommandContext();
+					return;
 				}
 
 				await commandCtx.reload();
-				return true;
+				forgetCommandContext();
+				return;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				requeueFailedCommand(item, ctx, command.name, message);
-				return true;
+				engine.requeue(prepared.item, prepared.handoffQueue);
+				forgetCommandContext();
+				persist();
+				updateUi(ctx);
+				notify(ctx, `Message queue failed to run /${command.name}: ${message}`, "error");
+				return;
 			}
 		}
 
-		if (activeEditor?.onSubmit) {
-			if (!dequeueForCommandDispatch(item, ctx, command.name)) return true;
+		if (command.name === "reload" && activeEditor?.onSubmit) {
+			engine.rememberLiveCommandContext();
+			const prepared = engine.prepareBuiltinCommand("reload");
+			if (prepared.action === "blocked" || !prepared.item) return;
+
+			commandContextNoticeIds.delete(item.id);
+			persist();
+			updateUi(ctx);
+			notify(ctx, "Running queued /reload.", "info");
 			try {
-				await activeEditor.dispatchSubmittedText(`/${command.name}`);
-				return true;
+				await activeEditor.dispatchSubmittedText("/reload");
+				forgetCommandContext();
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				requeueFailedCommand(item, ctx, command.name, message);
-				return true;
+				engine.requeue(prepared.item);
+				persist();
+				updateUi(ctx);
+				notify(ctx, `Message queue failed to run /reload: ${message}`, "error");
 			}
+			return;
 		}
 
+		engine.setPaused(true);
+		persist();
+		updateUi(ctx);
 		if (!commandContextNoticeIds.has(item.id)) {
 			commandContextNoticeIds.add(item.id);
-			ctx.ui.notify(
+			notify(
+				ctx,
 				`Queued /${command.name} needs an interactive command dispatcher. Run /queue resume after Pi is idle to dispatch it.`,
 				"warning",
 			);
 		}
-		return true;
 	}
 
 	async function pump(ctx: ExtensionContext) {
 		updateUi(ctx);
-		if (dispatching || paused || queue.length === 0) return;
-		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+		if (!engine.canPump({ idle: ctx.isIdle(), pending: ctx.hasPendingMessages() })) return;
 
-		const next = queue[0];
+		const next = engine.queue[0];
 		if (!next) return;
 
 		const builtinCommand = getQueuedBuiltinCommand(next.text);
@@ -547,50 +506,47 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 		const messageText = expandQueuedSlashCommand(next.text);
 		if (messageText === undefined) {
-			queue.shift();
+			const canRestoreToEditor = Boolean(ctx.hasUI && !ctx.ui.getEditorText().trim());
+			const result = engine.handleUnexpandedSlashCommand({ canRestoreToEditor });
 			persist();
-			updateUi(ctx, `restored #${next.id}`);
-			if (ctx.hasUI && !ctx.ui.getEditorText().trim()) {
-				ctx.ui.setEditorText(next.text);
+			updateUi(ctx);
+			if (result.action === "restored" && result.item && ctx.hasUI) {
+				ctx.ui.setEditorText(result.item.text);
+				notify(ctx, `Queued slash command #${result.item.id} needs interactive execution; restored it to the editor.`, "warning");
+				return;
 			}
-			ctx.ui.notify(`Queued slash command #${next.id} needs interactive execution; restored it to the editor.`, "warning");
+
+			notify(ctx, `Queued slash command #${next.id} needs interactive execution; left it in the queue.`, "warning");
 			return;
 		}
 
 		const blocker = getDispatchBlocker(ctx);
 		if (blocker) {
-			ctx.ui.notify(blocker, "warning");
+			notify(ctx, blocker, "warning");
 			return;
 		}
 
-		dispatching = { id: next.id, accepted: false };
-		updateUi(ctx, `sending #${next.id}`);
+		engine.markSending(next.id);
+		updateUi(ctx);
+		startSendWatchdog(ctx, next.id);
 
 		try {
 			pi.sendUserMessage(messageText);
 		} catch (error) {
-			dispatching = undefined;
-			updateUi(ctx, `failed to send #${next.id}`);
+			clearSendWatchdog();
+			engine.failSend();
+			persist();
+			updateUi(ctx);
 			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`Message queue failed to send #${next.id}: ${message}`, "error");
+			notify(ctx, `Message queue failed to send #${next.id}: ${message}`, "error");
 		}
 	}
 
 	function acceptPendingDispatch(ctx: ExtensionContext) {
-		if (!dispatching || dispatching.accepted) return;
-
-		const pending = dispatching;
-		const next = queue[0];
-		if (!next || next.id !== pending.id) {
-			dispatching = undefined;
-			updateUi(ctx);
-			return;
-		}
-
-		queue.shift();
-		dispatching = { ...pending, accepted: true };
-		persist();
-		updateUi(ctx, `accepted #${pending.id}`);
+		const accepted = engine.acceptPendingDispatch();
+		clearSendWatchdog();
+		if (accepted) persist();
+		updateUi(ctx);
 	}
 
 	async function handleQueueCommand(args: string, ctx: ExtensionCommandContext) {
@@ -603,7 +559,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			case "enqueue": {
 				const item = enqueue(rest, "back", ctx);
 				if (item) {
-					ctx.ui.notify(`Queued #${item.id}.`, "info");
+					notify(ctx, `Queued #${item.id}.`, "info");
 					schedulePump(ctx);
 				}
 				return;
@@ -613,7 +569,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			case "front": {
 				const item = enqueue(rest, "front", ctx);
 				if (item) {
-					ctx.ui.notify(`Queued #${item.id} at the front.`, "info");
+					notify(ctx, `Queued #${item.id} at the front.`, "info");
 					schedulePump(ctx);
 				}
 				return;
@@ -623,32 +579,31 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			case "ls":
 			case "status":
 				updateUi(ctx);
-				ctx.ui.notify(formatQueue(queue, paused), "info");
+				notify(ctx, formatQueue(engine.queue, engine.paused), "info");
 				return;
 
 			case "pause":
 			case "stop":
-				paused = true;
+				engine.setPaused(true);
 				persist();
-				updateUi(ctx, "paused");
-				ctx.ui.notify("Message queue paused.", "info");
+				updateUi(ctx);
+				notify(ctx, "Message queue paused.", "info");
 				return;
 
 			case "resume":
 			case "start":
-				paused = false;
+				engine.setPaused(false);
 				persist();
-				updateUi(ctx, "resumed");
-				ctx.ui.notify("Message queue resumed.", "info");
+				updateUi(ctx);
+				notify(ctx, "Message queue resumed.", "info");
 				schedulePump(ctx);
 				return;
 
 			case "clear": {
-				const count = queue.length;
-				queue = [];
+				const count = engine.clear();
 				persist();
 				updateUi(ctx);
-				ctx.ui.notify(`Cleared ${count} queued message${count === 1 ? "" : "s"}.`, "info");
+				notify(ctx, `Cleared ${count} queued message${count === 1 ? "" : "s"}.`, "info");
 				return;
 			}
 
@@ -656,14 +611,14 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			case "rm":
 			case "delete":
 			case "del": {
-				const removed = removeQueued(rest);
+				const removed = engine.remove(rest);
 				if (!removed) {
-					ctx.ui.notify("Usage: /queue remove <position> or /queue remove #<id>", "warning");
+					notify(ctx, "Usage: /queue remove <position> or /queue remove #<id>", "warning");
 					return;
 				}
 				persist();
-				updateUi(ctx, `removed #${removed.id}`);
-				ctx.ui.notify(`Removed #${removed.id}.`, "info");
+				updateUi(ctx);
+				notify(ctx, `Removed #${removed.id}.`, "info");
 				return;
 			}
 
@@ -673,25 +628,27 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 				return;
 
 			case "show":
-				widgetVisible = true;
+				engine.setWidgetVisible(true);
 				persist();
-				updateUi(ctx, "widget shown");
+				updateUi(ctx);
 				return;
 
 			case "hide":
-				widgetVisible = false;
+				engine.setWidgetVisible(false);
 				persist();
 				updateUi(ctx);
-				ctx.ui.notify("Message queue widget hidden. Status still appears in the footer.", "info");
+				notify(ctx, "Message queue widget hidden. Status still appears in the footer.", "info");
 				return;
 
 			case "help":
-				ctx.ui.notify(
+				notify(
+					ctx,
 					[
 						"/queue <message> or /queue add <message> — append",
 						"/queue next <message> — put at front",
 						"/queue list | pause | resume | clear | remove <n|#id>",
 						"/queue edit-last or Shift+Left — edit the last queued message",
+						"Enter steers natively while Pi is working. Alt+Enter queues a follow-up here.",
 						"Queued /new and /reload entries run as Pi commands.",
 						"/q <message> is a short alias. Ctrl+Shift+Q queues editor text.",
 					].join("\n"),
@@ -722,6 +679,10 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return { action: "continue" };
+		const streamingBehavior = (event as { streamingBehavior?: "steer" | "followUp" }).streamingBehavior;
+		if (workingInputIntent(streamingBehavior === "followUp" ? "followUp" : "submit") === "native") {
+			return { action: "continue" };
+		}
 		return queueInputWhileWorking(event.text, ctx) ? { action: "handled" } : { action: "continue" };
 	});
 
@@ -730,18 +691,30 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		dispatching = undefined;
+		engine.clearSending();
+		updateUi(ctx);
+		schedulePump(ctx);
+	});
+
+	// agent_settled exists on newer Pi versions. Register loosely so this package
+	// still typechecks against older hosts; canPump() prevents a double send.
+	(
+		pi as ExtensionAPI & {
+			on(event: "agent_settled", handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void): void;
+		}
+	).on("agent_settled", async (_event, ctx) => {
+		engine.clearSending();
 		updateUi(ctx);
 		schedulePump(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
-		dispatching = undefined;
+		engine.failSend();
+		forgetCommandContext();
 		activeEditor = undefined;
-		lastCommandCtx = undefined;
 		commandContextNoticeIds.clear();
-		if (pumpHandle) clearImmediate(pumpHandle);
-		pumpHandle = undefined;
+		clearSendWatchdog();
+		clearPump();
 	});
 
 	pi.registerCommand("queue", {
@@ -781,7 +754,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			const item = enqueue(text, "back", ctx);
 			if (!item) return;
 			ctx.ui.setEditorText("");
-			ctx.ui.notify(`Queued #${item.id}.`, "info");
+			notify(ctx, `Queued #${item.id}.`, "info");
 			schedulePump(ctx);
 		},
 	});
@@ -792,4 +765,5 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			editLastQueued(ctx);
 		},
 	});
+
 }

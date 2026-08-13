@@ -1,79 +1,80 @@
 # @matheusbbarni/pi-message-queue
 
-A [Pi](https://pi.dev) extension that keeps a session-local FIFO queue of user messages and sends them to the agent one at a time.
+Persistent FIFO for [Pi](https://pi.dev). Native Enter already steers the current turn. This package is for the messages you want to keep, edit, reorder, and send after Pi is actually idle.
 
-Pi already has native steering/follow-up keys in recent versions. This package adds an explicit, persistent queue with slash commands, a footer status, and an optional queue widget.
+Queue state lives in the session as custom entries, so it survives `/reload`, resume, and tree navigation. It is not sent to the model.
 
-## Install / run
-
-From this repository:
-
-```bash
-pi -e ./index.ts
-```
-
-Install from npm:
+## Install
 
 ```bash
 pi install npm:@matheusbbarni/pi-message-queue
 ```
 
-Or install it as a local Pi package:
+From this repo:
+
+```bash
+pi -e ./index.ts
+```
+
+Or as a local package:
 
 ```bash
 pi install ./pi-message-queue
 ```
 
+## While Pi is working
+
+| Input | Where it goes |
+| --- | --- |
+| Enter | Native steer. Not this queue. |
+| Alt+Enter | This queue |
+| `/queue …`, `/q …`, Ctrl+Shift+Q | This queue |
+
+Use Enter when you want to interrupt the current turn. Use this package when you want a follow-up that waits, persists, and can be edited.
+
+`/q` is a short alias for `/queue add`. If you already have a prompt template named `q`, this command wins.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `/queue <message>` | Append a message to the queue. |
-| `/queue add <message>` | Append a message to the queue. |
-| `/q <message>` | Short alias for `/queue add`. |
-| `/queue next <message>` | Put a message at the front of the queue. |
-| `/queue list` | Show pending messages. |
-| `/queue remove <n>` | Remove the 1-based queue position. |
-| `/queue remove #<id>` | Remove by message id. |
-| `/queue edit-last` | Pull the last queued message back into the editor. |
-| `/queue pause` | Stop dispatching new queued messages. |
-| `/queue resume` | Resume dispatching. |
-| `/queue clear` | Clear all pending messages. |
-| `/queue show` / `/queue hide` | Toggle the below-editor queue widget. |
-| `/queue help` | Show a compact help summary. |
+| `/queue <message>` | Append |
+| `/queue add <message>` | Append. Same as `/q <message>` |
+| `/queue next <message>` | Put at the front |
+| `/queue list` | Show pending messages (`ls`, `status`) |
+| `/queue remove <n>` | Remove 1-based position |
+| `/queue remove #<id>` | Remove by id |
+| `/queue edit-last` | Pull the last queued message back into the editor |
+| `/queue pause` / `/queue resume` | Stop or start dispatch (`stop`, `start`) |
+| `/queue clear` | Drop pending messages. An in-flight send is kept |
+| `/queue show` / `/queue hide` | Toggle the below-editor widget |
+| `/queue help` | Compact help |
 
-Shortcut:
+Keys:
 
-- `Ctrl+Shift+Q` queues the current editor text and clears the editor.
-- `Shift+Left` pulls the last queued message back into the editor for editing.
+- **Ctrl+Shift+Q** queues the current editor text and clears the editor
+- **Shift+Left** restores the last queued message to the editor (editor must be empty)
+- **Alt+Enter** queues a follow-up here instead of Pi's native follow-up list
 
-## Behavior
+A footer status shows the count. The widget lists a short preview of the next few items.
 
-- Queued messages are shown in a compact below-editor widget similar to Pi's built-in follow-up queue display.
-- Ordinary user messages and slash commands submitted while Pi is working are captured into this persistent queue instead of Pi's native steering/follow-up queue.
-- Skill invocations such as `/skill:git-commit feat` and prompt templates are expanded when dispatched.
-- Typing `/new` or `/reload` while Pi is working also queues those commands instead of showing Pi's built-in wait warning.
-- Queued messages are sent only when Pi is idle and there are no native Pi pending messages.
-- Queued `/new` and `/reload` entries run Pi's built-in commands instead of being sent to the agent as prompt text.
-- After a queued message completes, the next queued message is sent automatically.
-- Queue state is stored as custom session entries, so it survives `/reload`, session resume, and tree navigation on the active branch.
-- Custom state entries do not participate in LLM context.
+## Dispatch
 
-## Package shape
+The queue sends one message at a time, and only when Pi is idle with no native pending messages. After one finishes, the next goes out automatically unless you paused the queue.
 
-Pi discovers the extension through `package.json`:
+A few special cases:
 
-```json
-{
-  "pi": {
-    "extensions": ["index.ts"]
-  }
-}
-```
+- `/skill:…` and prompt templates expand when dispatched
+- queued `/new` and `/reload` run as Pi commands, not prompt text
+- leftover items after a queued `/new` move into the new session
+- unknown slash commands stay queued if the editor is busy, or get restored to the editor if it's empty
+- a failed or unconfirmed send pauses the queue instead of leaving it stuck
+- you cannot remove, edit, or clear the message currently being sent
 
 ## Development
 
 ```bash
 npm install
+npm test
 npm run typecheck
 ```
