@@ -120,8 +120,9 @@ test("clearing a send only happens after Pi accepted it", () => {
 });
 
 
-test("ordinary submit while working stays on native steer", () => {
-	assert.equal(workingInputIntent("submit"), "native");
+test("ordinary submit while working goes to the queue", () => {
+	assert.equal(workingInputIntent("submit"), "queue");
 	assert.equal(workingInputIntent("followUp"), "queue");
 	assert.equal(workingInputIntent("queueCommand"), "queue");
+	assert.equal(workingInputIntent("steer"), "native");
 });

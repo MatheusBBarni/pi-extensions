@@ -77,7 +77,7 @@ class MessageQueueEditor extends CustomEditor {
 		tui: TUI,
 		theme: EditorTheme,
 		private readonly keybindingsManager: KeybindingsManager,
-		private readonly queueInput: (text: string) => boolean,
+		private readonly steerInput: (text: string) => boolean,
 	) {
 		super(tui, theme, keybindingsManager);
 	}
@@ -90,7 +90,8 @@ class MessageQueueEditor extends CustomEditor {
 	handleInput(data: string): void {
 		if (this.keybindingsManager.matches(data, "app.message.followUp")) {
 			const text = this.getExpandedText();
-			if (this.queueInput(text)) {
+			if (this.steerInput(text)) {
+				this.addToHistory(text);
 				this.setText("");
 				return;
 			}
@@ -171,6 +172,7 @@ function splitCommand(args: string): { command: string; rest: string } {
 		"show",
 		"hide",
 		"help",
+		"steer",
 	]);
 
 	if (!known.has(head)) {
@@ -230,7 +232,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			lines.push(theme.fg("dim", `  … ${engine.queue.length - MAX_WIDGET_ITEMS} more queued inputs`));
 		}
 
-		lines.push(theme.fg("dim", "    shift + ← edit last queued message"));
+		lines.push(theme.fg("dim", "    alt+enter steer · shift + ← edit last queued message"));
 
 		ctx.ui.setWidget(WIDGET_KEY, lines, { placement: "belowEditor" });
 	}
@@ -375,10 +377,13 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		return undefined;
 	}
 
+	function isWorking(ctx: ExtensionContext): boolean {
+		return !ctx.isIdle() || ctx.hasPendingMessages();
+	}
+
 	function queueInputWhileWorking(text: string, ctx: ExtensionContext): boolean {
 		const trimmed = text.trim();
-		const isWorking = !ctx.isIdle() || ctx.hasPendingMessages();
-		if (!isWorking || !trimmed) return false;
+		if (!isWorking(ctx) || !trimmed) return false;
 
 		const item = enqueue(trimmed, "back", ctx);
 		if (item) {
@@ -386,6 +391,45 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			schedulePump(ctx);
 		}
 		return true;
+	}
+
+	function steerText(text: string, ctx: ExtensionContext): boolean {
+		const trimmed = text.trim();
+		if (!trimmed) {
+			notify(ctx, "Nothing to steer with.", "warning");
+			return false;
+		}
+
+		try {
+			if (isWorking(ctx)) {
+				pi.sendUserMessage(trimmed, { deliverAs: "steer" });
+				notify(ctx, "Steering the current turn.", "info");
+			} else {
+				pi.sendUserMessage(trimmed);
+			}
+			return true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			notify(ctx, `Failed to steer: ${message}`, "error");
+			return false;
+		}
+	}
+
+	function steerWhileWorking(text: string, ctx: ExtensionContext): boolean {
+		if (!isWorking(ctx) || !text.trim()) return false;
+		return steerText(text, ctx);
+	}
+
+	async function handleSteerCommand(args: string, ctx: ExtensionCommandContext) {
+		rememberCommandContext(ctx);
+		const fromArgs = args.trim();
+		const fromEditor = ctx.hasUI ? ctx.ui.getEditorText() : "";
+		const text = fromArgs || fromEditor;
+		if (!steerText(text, ctx)) return;
+		if (!fromArgs && ctx.hasUI) {
+			activeEditor?.addToHistory(text);
+			ctx.ui.setEditorText("");
+		}
 	}
 
 	function startSendWatchdog(ctx: ExtensionContext, id: number) {
@@ -627,6 +671,10 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 				editLastQueued(ctx);
 				return;
 
+			case "steer":
+				await handleSteerCommand(rest, ctx);
+				return;
+
 			case "show":
 				engine.setWidgetVisible(true);
 				persist();
@@ -648,7 +696,8 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 						"/queue next <message> — put at front",
 						"/queue list | pause | resume | clear | remove <n|#id>",
 						"/queue edit-last or Shift+Left — edit the last queued message",
-						"Enter steers natively while Pi is working. Alt+Enter queues a follow-up here.",
+						"/queue steer <message> or /steer <message> — steer the current turn",
+						"Enter queues a follow-up here while Pi is working. Alt+Enter steers.",
 						"Queued /new and /reload entries run as Pi commands.",
 						"/q <message> is a short alias. Ctrl+Shift+Q queues editor text.",
 					].join("\n"),
@@ -661,7 +710,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		restore(ctx);
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-			const editor = new MessageQueueEditor(tui, theme, keybindings, (text) => queueInputWhileWorking(text, ctx));
+			const editor = new MessageQueueEditor(tui, theme, keybindings, (text) => steerWhileWorking(text, ctx));
 			activeEditor = editor;
 			return editor;
 		});
@@ -679,6 +728,9 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return { action: "continue" };
+		// Native Enter arrives as streamingBehavior "steer". That is the default
+		// submit while Pi is working, and this package queues it. Explicit steer
+		// uses sendUserMessage({ deliverAs: "steer" }) with source "extension".
 		const streamingBehavior = (event as { streamingBehavior?: "steer" | "followUp" }).streamingBehavior;
 		if (workingInputIntent(streamingBehavior === "followUp" ? "followUp" : "submit") === "native") {
 			return { action: "continue" };
@@ -732,6 +784,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 				"show",
 				"hide",
 				"help",
+				"steer",
 			];
 			const token = prefix.trimStart().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
 			if (prefix.trimStart().includes(" ")) return null;
@@ -744,6 +797,27 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	pi.registerCommand("q", {
 		description: "Shortcut for /queue add <message>",
 		handler: async (args, ctx) => handleQueueCommand(args.trim() ? `add ${args}` : "list", ctx),
+	});
+
+	pi.registerCommand("steer", {
+		description: "Steer the current turn with a message, or send immediately if Pi is idle",
+		handler: async (args, ctx) => handleSteerCommand(args, ctx),
+	});
+
+	pi.registerShortcut("alt+enter", {
+		description: "Steer the current turn with the editor text",
+		handler: async (ctx) => {
+			if (!ctx.hasUI) return;
+			const text = activeEditor?.getExpandedText() ?? ctx.ui.getEditorText();
+			if (steerWhileWorking(text, ctx)) {
+				activeEditor?.addToHistory(text);
+				ctx.ui.setEditorText("");
+				return;
+			}
+			if (isWorking(ctx) || !text.trim() || !activeEditor) return;
+			activeEditor.setText("");
+			await activeEditor.dispatchSubmittedText(text.trim());
+		},
 	});
 
 	pi.registerShortcut("ctrl+shift+q", {

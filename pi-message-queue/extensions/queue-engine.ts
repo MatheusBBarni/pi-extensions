@@ -237,9 +237,9 @@ export class QueueEngine {
 
 }
 
-export type WorkingInputSource = "submit" | "followUp" | "queueCommand";
+export type WorkingInputSource = "submit" | "followUp" | "steer" | "queueCommand";
 
 export function workingInputIntent(source: WorkingInputSource): "native" | "queue" {
-	return source === "submit" ? "native" : "queue";
+	return source === "steer" ? "native" : "queue";
 }
 

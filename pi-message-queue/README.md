@@ -1,6 +1,6 @@
 # @matheusbbarni/pi-message-queue
 
-Persistent FIFO for [Pi](https://pi.dev). Native Enter already steers the current turn. This package is for the messages you want to keep, edit, reorder, and send after Pi is actually idle.
+Persistent FIFO for [Pi](https://pi.dev). While Pi is working, Enter queues a follow-up here. Use Alt+Enter or `/steer` when you want to interrupt the current turn.
 
 Queue state lives in the session as custom entries, so it survives `/reload`, resume, and tree navigation. It is not sent to the model.
 
@@ -26,11 +26,12 @@ pi install ./pi-message-queue
 
 | Input | Where it goes |
 | --- | --- |
-| Enter | Native steer. Not this queue. |
-| Alt+Enter | This queue |
+| Enter | This queue |
+| Alt+Enter | Native steer. Not this queue. |
+| `/steer …`, `/queue steer …` | Native steer. Not this queue. |
 | `/queue …`, `/q …`, Ctrl+Shift+Q | This queue |
 
-Use Enter when you want to interrupt the current turn. Use this package when you want a follow-up that waits, persists, and can be edited.
+Use this package when you want a follow-up that waits, persists, and can be edited. Use Alt+Enter or `/steer` when you want to interrupt the current turn.
 
 `/q` is a short alias for `/queue add`. If you already have a prompt template named `q`, this command wins.
 
@@ -48,15 +49,19 @@ Use Enter when you want to interrupt the current turn. Use this package when you
 | `/queue pause` / `/queue resume` | Stop or start dispatch (`stop`, `start`) |
 | `/queue clear` | Drop pending messages. An in-flight send is kept |
 | `/queue show` / `/queue hide` | Toggle the below-editor widget |
+| `/queue steer <message>` | Steer the current turn. Same as `/steer <message>` |
 | `/queue help` | Compact help |
 
 Keys:
 
+- **Enter** queues a follow-up here while Pi is working
+- **Alt+Enter** steers the current turn with the editor text
 - **Ctrl+Shift+Q** queues the current editor text and clears the editor
 - **Shift+Left** restores the last queued message to the editor (editor must be empty)
-- **Alt+Enter** queues a follow-up here instead of Pi's native follow-up list
 
-A footer status shows the count. The widget lists a short preview of the next few items.
+`/steer` with no arguments uses the current editor text. If Pi is idle, it sends immediately.
+
+A footer status shows the count. The widget lists a short preview of the next few items, plus the steer and edit-last hints.
 
 ## Dispatch
 
