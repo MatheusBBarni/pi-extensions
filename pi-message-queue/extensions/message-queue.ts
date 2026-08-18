@@ -76,28 +76,29 @@ class MessageQueueEditor extends CustomEditor {
 	constructor(
 		tui: TUI,
 		theme: EditorTheme,
-		private readonly keybindingsManager: KeybindingsManager,
+		keybindingsManager: KeybindingsManager,
 		private readonly steerInput: (text: string) => boolean,
 	) {
 		super(tui, theme, keybindingsManager);
-	}
-
-	async dispatchSubmittedText(text: string): Promise<void> {
-		const result = this.onSubmit?.(text);
-		await Promise.resolve(result);
-	}
-
-	handleInput(data: string): void {
-		if (this.keybindingsManager.matches(data, "app.message.followUp")) {
+		// app.message.followUp (default: alt+enter) is reserved. Intercept it here
+		// instead of registerShortcut(), which Pi skips as a built-in conflict.
+		this.onAction("app.message.followUp", () => {
 			const text = this.getExpandedText();
 			if (this.steerInput(text)) {
 				this.addToHistory(text);
 				this.setText("");
 				return;
 			}
-		}
+			const trimmed = text.trim();
+			if (!trimmed) return;
+			this.setText("");
+			void this.dispatchSubmittedText(trimmed);
+		});
+	}
 
-		super.handleInput(data);
+	async dispatchSubmittedText(text: string): Promise<void> {
+		const result = this.onSubmit?.(text);
+		await Promise.resolve(result);
 	}
 }
 
@@ -802,22 +803,6 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	pi.registerCommand("steer", {
 		description: "Steer the current turn with a message, or send immediately if Pi is idle",
 		handler: async (args, ctx) => handleSteerCommand(args, ctx),
-	});
-
-	pi.registerShortcut("alt+enter", {
-		description: "Steer the current turn with the editor text",
-		handler: async (ctx) => {
-			if (!ctx.hasUI) return;
-			const text = activeEditor?.getExpandedText() ?? ctx.ui.getEditorText();
-			if (steerWhileWorking(text, ctx)) {
-				activeEditor?.addToHistory(text);
-				ctx.ui.setEditorText("");
-				return;
-			}
-			if (isWorking(ctx) || !text.trim() || !activeEditor) return;
-			activeEditor.setText("");
-			await activeEditor.dispatchSubmittedText(text.trim());
-		},
 	});
 
 	pi.registerShortcut("ctrl+shift+q", {
