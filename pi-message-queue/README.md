@@ -2,6 +2,8 @@
 
 Persistent FIFO for [Pi](https://pi.dev). While Pi is working, Enter queues a follow-up here. Use Alt+Enter or `/steer` when you want to interrupt the current turn.
 
+The package wraps the current editor instead of replacing it, so Amp/Zentui chrome and command palettes stay in place.
+
 Queue state lives in the session as custom entries, so it survives `/reload`, resume, and tree navigation. It is not sent to the model.
 
 ## Install

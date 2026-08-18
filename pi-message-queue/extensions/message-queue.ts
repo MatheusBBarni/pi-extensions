@@ -1,14 +1,12 @@
 import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
-	CustomEditor,
 	stripFrontmatter,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
-	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
+import { installQueueEditor, type QueueEditorHandle } from "./editor-wrap.js";
 import {
 	QueueEngine,
 	restoreSnapshot,
@@ -70,36 +68,6 @@ function hasCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContex
 function notify(ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info") {
 	if (!ctx.hasUI) return;
 	ctx.ui.notify(message, type);
-}
-
-class MessageQueueEditor extends CustomEditor {
-	constructor(
-		tui: TUI,
-		theme: EditorTheme,
-		keybindingsManager: KeybindingsManager,
-		private readonly steerInput: (text: string) => boolean,
-	) {
-		super(tui, theme, keybindingsManager);
-		// app.message.followUp (default: alt+enter) is reserved. Intercept it here
-		// instead of registerShortcut(), which Pi skips as a built-in conflict.
-		this.onAction("app.message.followUp", () => {
-			const text = this.getExpandedText();
-			if (this.steerInput(text)) {
-				this.addToHistory(text);
-				this.setText("");
-				return;
-			}
-			const trimmed = text.trim();
-			if (!trimmed) return;
-			this.setText("");
-			void this.dispatchSubmittedText(trimmed);
-		});
-	}
-
-	async dispatchSubmittedText(text: string): Promise<void> {
-		const result = this.onSubmit?.(text);
-		await Promise.resolve(result);
-	}
 }
 
 function parseCommandArgs(argsString: string): string[] {
@@ -187,7 +155,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 	const engine = new QueueEngine();
 	let pumpHandle: ReturnType<typeof setImmediate> | undefined;
 	let sendWatchdog: ReturnType<typeof setTimeout> | undefined;
-	let activeEditor: MessageQueueEditor | undefined;
+	let activeEditor: QueueEditorHandle | undefined;
 	// Only the current session's command context is usable. Session replacement
 	// invalidates this handle so later /new and /reload cannot call a stale ctx.
 	let lastCommandCtx: ExtensionCommandContext | undefined;
@@ -710,11 +678,14 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		restore(ctx);
-		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-			const editor = new MessageQueueEditor(tui, theme, keybindings, (text) => steerWhileWorking(text, ctx));
-			activeEditor = editor;
-			return editor;
-		});
+		if (ctx.hasUI) {
+			installQueueEditor(ctx.ui, {
+				steerInput: (text) => steerWhileWorking(text, ctx),
+				onReady: (editor) => {
+					activeEditor = editor;
+				},
+			});
+		}
 		schedulePump(ctx);
 	});
 
