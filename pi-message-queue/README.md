@@ -1,6 +1,6 @@
 # @matheusbbarni/pi-message-queue
 
-Persistent FIFO for [Pi](https://pi.dev). While Pi is working, Enter queues a follow-up here. Use Alt+Enter or `/steer` when you want to interrupt the current turn.
+Persistent FIFO for [Pi](https://pi.dev). While Pi is working, Enter queues a follow-up here. Use Ctrl+Shift+S or `/steer` when you want to interrupt the current turn.
 
 The package wraps the current editor instead of replacing it, so Amp/Zentui chrome and command palettes stay in place.
 
@@ -29,11 +29,12 @@ pi install ./pi-message-queue
 | Input | Where it goes |
 | --- | --- |
 | Enter | This queue |
-| Alt+Enter | Native steer. Not this queue. |
+| Ctrl+Shift+S | Native steer. Not this queue. |
+| Alt+Enter | Native steer if the terminal delivers it. Often dead on macOS. |
 | `/steer …`, `/queue steer …` | Native steer. Not this queue. |
 | `/queue …`, `/q …`, Ctrl+Shift+Q | This queue |
 
-Use this package when you want a follow-up that waits, persists, and can be edited. Use Alt+Enter or `/steer` when you want to interrupt the current turn.
+Use this package when you want a follow-up that waits, persists, and can be edited. Use Ctrl+Shift+S or `/steer` when you want to interrupt the current turn. On macOS, Option+Enter usually never reaches Pi, so do not rely on Alt+Enter.
 
 `/q` is a short alias for `/queue add`. If you already have a prompt template named `q`, this command wins.
 
@@ -57,7 +58,8 @@ Use this package when you want a follow-up that waits, persists, and can be edit
 Keys:
 
 - **Enter** queues a follow-up here while Pi is working
-- **Alt+Enter** steers the current turn with the editor text
+- **Ctrl+Shift+S** steers the current turn with the editor text
+- **Alt+Enter** also steers if the terminal reports it (unreliable on macOS)
 - **Ctrl+Shift+Q** queues the current editor text and clears the editor
 - **Shift+Left** restores the last queued message to the editor (editor must be empty)
 

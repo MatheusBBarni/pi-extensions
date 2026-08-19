@@ -23,6 +23,8 @@ const WIDGET_KEY = "pi-message-queue:widget";
 const MAX_WIDGET_ITEMS = 5;
 const MAX_PREVIEW_LENGTH = 96;
 const SEND_CONFIRM_MS = 2000;
+const STEER_SHORTCUT = "ctrl+shift+s";
+const QUEUE_SHORTCUT = "ctrl+shift+q";
 
 type QueuedBuiltinCommand = { name: QueuedBuiltinCommandName };
 
@@ -201,7 +203,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			lines.push(theme.fg("dim", `  … ${engine.queue.length - MAX_WIDGET_ITEMS} more queued inputs`));
 		}
 
-		lines.push(theme.fg("dim", "    alt+enter steer · shift + ← edit last queued message"));
+		lines.push(theme.fg("dim", `    ${STEER_SHORTCUT} steer · shift + ← edit last queued message`));
 
 		ctx.ui.setWidget(WIDGET_KEY, lines, { placement: "belowEditor" });
 	}
@@ -666,7 +668,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 						"/queue list | pause | resume | clear | remove <n|#id>",
 						"/queue edit-last or Shift+Left — edit the last queued message",
 						"/queue steer <message> or /steer <message> — steer the current turn",
-						"Enter queues a follow-up here while Pi is working. Alt+Enter steers.",
+						"Enter queues a follow-up here while Pi is working. Ctrl+Shift+S steers.",
 						"Queued /new and /reload entries run as Pi commands.",
 						"/q <message> is a short alias. Ctrl+Shift+Q queues editor text.",
 					].join("\n"),
@@ -776,7 +778,7 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => handleSteerCommand(args, ctx),
 	});
 
-	pi.registerShortcut("ctrl+shift+q", {
+	pi.registerShortcut(QUEUE_SHORTCUT, {
 		description: "Queue current editor text for later execution",
 		handler: async (ctx) => {
 			if (!ctx.hasUI) return;
@@ -786,6 +788,17 @@ export default function messageQueueExtension(pi: ExtensionAPI) {
 			ctx.ui.setEditorText("");
 			notify(ctx, `Queued #${item.id}.`, "info");
 			schedulePump(ctx);
+		},
+	});
+
+	pi.registerShortcut(STEER_SHORTCUT, {
+		description: "Steer the current turn with the editor text",
+		handler: async (ctx) => {
+			if (!ctx.hasUI) return;
+			const text = ctx.ui.getEditorText();
+			if (!steerText(text, ctx)) return;
+			activeEditor?.addToHistory(text);
+			ctx.ui.setEditorText("");
 		},
 	});
 
