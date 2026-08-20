@@ -3,6 +3,15 @@
   "version": "0.1.4",
   "description": "Interactive Codex /goal sessions for Pi with persistent start/resume/status commands.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatheusBBarni/pi-extensions.git",
+    "directory": "pi-goal-extension"
+  },
+  "homepage": "https://github.com/MatheusBBarni/pi-extensions/tree/main/pi-goal-extension",
+  "bugs": {
+    "url": "https://github.com/MatheusBBarni/pi-extensions/issues"
+  },
   "publishConfig": {
     "access": "public"
   },

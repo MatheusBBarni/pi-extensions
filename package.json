@@ -4,9 +4,18 @@
   "private": true,
   "description": "My day-to-day Pi extensions.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatheusBBarni/pi-extensions.git"
+  },
+  "homepage": "https://github.com/MatheusBBarni/pi-extensions",
+  "bugs": {
+    "url": "https://github.com/MatheusBBarni/pi-extensions/issues"
+  },
   "workspaces": [
     "pi-goal-extension",
     "pi-message-queue",
+    "pi-run-timer",
     "pi-stitch-mcp"
   ],
   "scripts": {
@@ -14,7 +23,8 @@
     "pack:dry-run": "npm pack --workspaces --dry-run",
     "publish:goal": "npm publish --workspace @matheusbbarni/pi-goal-extension --access public",
     "publish:queue": "npm publish --workspace @matheusbbarni/pi-message-queue --access public",
+    "publish:timer": "npm publish --workspace @matheusbbarni/pi-run-timer --access public",
     "publish:stitch": "npm publish --workspace @matheusbbarni/pi-stitch-mcp --access public",
-    "publish:all": "npm run publish:goal && npm run publish:queue && npm run publish:stitch"
+    "publish:all": "npm run publish:goal && npm run publish:queue && npm run publish:timer && npm run publish:stitch"
   }
 }

@@ -3,6 +3,15 @@
   "version": "0.1.1",
   "description": "Pi extension that bridges Google Stitch MCP tools into Pi.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatheusBBarni/pi-extensions.git",
+    "directory": "pi-stitch-mcp"
+  },
+  "homepage": "https://github.com/MatheusBBarni/pi-extensions/tree/main/pi-stitch-mcp",
+  "bugs": {
+    "url": "https://github.com/MatheusBBarni/pi-extensions/issues"
+  },
   "publishConfig": {
     "access": "public"
   },

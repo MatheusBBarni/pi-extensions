@@ -1,14 +1,14 @@
 {
-  "name": "@matheusbbarni/pi-message-queue",
-  "version": "0.2.3",
-  "description": "A Pi extension for queueing user messages and sending them one after another.",
+  "name": "@matheusbbarni/pi-run-timer",
+  "version": "0.1.0",
+  "description": "A Pi extension that shows how long the current run has been going.",
   "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MatheusBBarni/pi-extensions.git",
-    "directory": "pi-message-queue"
+    "directory": "pi-run-timer"
   },
-  "homepage": "https://github.com/MatheusBBarni/pi-extensions/tree/main/pi-message-queue",
+  "homepage": "https://github.com/MatheusBBarni/pi-extensions/tree/main/pi-run-timer",
   "bugs": {
     "url": "https://github.com/MatheusBBarni/pi-extensions/issues"
   },
@@ -18,10 +18,15 @@
   "keywords": [
     "pi-package",
     "pi-extension",
-    "message-queue",
-    "queue"
+    "timer",
+    "status"
   ],
   "license": "MIT",
+  "files": [
+    "index.ts",
+    "clock.ts",
+    "README.md"
+  ],
   "pi": {
     "extensions": [
       "index.ts"
